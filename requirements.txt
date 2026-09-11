@@ -1,0 +1,8 @@
+aiogram==3.31.0
+playwright==1.62.0
+httpx==0.28.1
+aiosqlite==0.22.1
+python-dotenv==1.2.3
+beautifulsoup4==4.15.0
+pytest==9.1.1
+pytest-asyncio==1.4.0

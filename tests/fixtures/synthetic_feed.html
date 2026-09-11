@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<!-- Синтетическая лента по образцу реальной разметки FB (2026-09-11): пограничные случаи. -->
+<html><head>
+<title>Test Zlín | Facebook</title>
+<meta property="al:android:url" content="fb://group/555">
+</head><body>
+<script type="application/json">{"require":[{"post_id":"111","creation_time":1789000000}]}</script>
+<div role="main"><div role="feed">
+
+  <!-- 1. заглушка-скелетон -->
+  <div><div role="article"><div><div></div></div></div></div>
+
+  <!-- 2. обычный пост: 2 абзаца, эмодзи, <br>, фото, видео blob и mp4, вложенный комментарий -->
+  <div><div role="article">
+    <a aria-label="Jan Novák" href="#" role="link"><svg aria-label="Jan Novák" role="img"><title>Jan Novák</title><image></image></svg></a>
+    <span dir="ltr"><div data-ad-rendering-role="profile_name"><h2><span>Jan  Novák</span></h2></div></span>
+    <span dir="ltr"><a aria-label="Včera v 14:30" role="link" href="https://www.facebook.com/groups/zlin.test/permalink/111/?__cft__[0]=AZabc&amp;__tn__=%2CO">Včera v 14:30</a>
+      <span aria-hidden="true">·</span><svg role="img"><title>Sdíleno s: Veřejná skupina</title></svg></span>
+    <div dir="auto"><div data-ad-rendering-role="story_message"><div data-ad-comet-preview="message" data-ad-preview="message">
+      <span dir="auto"><div dir="auto">Uzavírka na třídě Tomáše Bati <img alt="🚧" height="16" width="16" src="https://static.xx.fbcdn.net/images/emoji.php/v9/t1/1f6a7.png"></div>
+      <div dir="auto">Od 15. září do 20. září, objízdná trasa přes Kvítkovou.<br>Cena parkování 40 Kč/h.</div></span>
+    </div></div></div>
+    <a aria-label="Fotka" href="https://www.facebook.com/photo/?fbid=901&amp;set=pcb.111" role="link"><img alt="" src="https://scontent.xx.fbcdn.net/v/photo1.jpg?oe=ABC"></a>
+    <video src="blob:https://www.facebook.com/abc-def"></video>
+    <video src="https://video.xx.fbcdn.net/v/clip.mp4?oe=DEF"></video>
+    <div data-visualcompletion="ignore-dynamic"><div role="button"><span>To se mi líbí</span></div><div role="button"><span>Komentář</span></div></div>
+    <div role="article" aria-label="Komentář od Petr">
+      <div data-ad-rendering-role="profile_name"><span>Petr</span></div>
+      <a href="https://www.facebook.com/groups/zlin.test/posts/111/?comment_id=77">1 h</a>
+      <div dir="auto">Díky za info</div>
+      <a href="https://www.facebook.com/photo/?fbid=999&amp;set=pcb.111"><img alt="" src="https://scontent.xx.fbcdn.net/v/comment.jpg"></a>
+    </div>
+  </div></div>
+
+  <!-- 3. репост поста из другой группы, со своим комментарием -->
+  <div><div role="article">
+    <div data-ad-rendering-role="profile_name"><h2>Eva Malá</h2></div>
+    <a aria-label="3 h" role="link" href="/groups/zlin.test/posts/222/?__cft__[0]=x">3 h</a>
+    <div data-ad-rendering-role="story_message"><div data-ad-preview="message"><div dir="auto">Sdílím, ať to ví všichni</div></div></div>
+    <div data-ad-rendering-role="profile_name"><h3>Jiná skupina</h3></div>
+    <a aria-label="5 h" role="link" href="https://www.facebook.com/groups/other.group/posts/999/">5 h</a>
+    <div data-ad-rendering-role="story_message"><div data-ad-preview="message"><div dir="auto">Ztratil se pes, černý labrador, Zlín-Jižní Svahy</div></div></div>
+  </div></div>
+
+  <!-- 4. репост без своего текста: единственный блок текста — чужой -->
+  <div><div role="article">
+    <div data-ad-rendering-role="profile_name"><h2>Karel</h2></div>
+    <a aria-label="4 h" role="link" href="/groups/555/posts/444/">4 h</a>
+    <div data-ad-rendering-role="profile_name"><h3>Město Zlín</h3></div>
+    <a aria-label="6 h" role="link" href="https://www.facebook.com/permalink.php?story_fbid=pfbid0abc&amp;id=1">6 h</a>
+    <div data-ad-rendering-role="story_message"><div data-ad-preview="message"><div dir="auto">Oznámení města: odstávka vody 20. září 8:00–14:00</div></div></div>
+  </div></div>
+
+  <!-- 5. href метки времени не заполнен ("#"), ID только из фото set=gm.; текст не раскрыт -->
+  <div><div role="article">
+    <div data-ad-rendering-role="profile_name"><h2>Lucie</h2></div>
+    <a aria-label="20 min" role="link" href="#">20 min</a>
+    <div data-ad-preview="message"><div dir="auto">Hledám hlídání pro dvě děti, dlouhý text … <div role="button">Zobrazit víc</div></div></div>
+    <a href="https://www.facebook.com/photo/?fbid=902&amp;set=gm.333"><img alt="" src="https://scontent.xx.fbcdn.net/v/p2.jpg"></a>
+  </div></div>
+
+  <!-- 6. нет никакого ID -->
+  <div><div role="article">
+    <div data-ad-rendering-role="profile_name"><h2>Anonym</h2></div>
+    <div data-ad-preview="message"><div dir="auto">Příspěvek bez odkazu</div></div>
+  </div></div>
+
+  <!-- 7. только pfbid (так ссылаются страницы, не группы) — не поддерживаем -->
+  <div><div role="article">
+    <div data-ad-rendering-role="profile_name"><h2>Zlin.cz</h2></div>
+    <a role="link" href="https://www.facebook.com/zpravodajstvi.zlin.cz/posts/pfbid0Qbh3PPz1mGZE">58 min</a>
+    <div data-ad-preview="message"><div dir="auto">Zpráva ze stránky</div></div>
+  </div></div>
+
+  <!-- 8. дубль поста 111 -->
+  <div><div role="article">
+    <div data-ad-rendering-role="profile_name"><h2>Jan Novák</h2></div>
+    <a role="link" href="/groups/zlin.test/posts/111/">Včera v 14:30</a>
+    <div data-ad-preview="message"><div dir="auto">Uzavírka</div></div>
+  </div></div>
+
+  <!-- 9. data-атрибуты пропали: запасной путь через текст всей статьи -->
+  <div><div role="article">
+    <h2><a href="#">Marek Dvořák</a></h2>
+    <a aria-label="2 h" role="link" href="/groups/zlin.test/posts/555000/">2 h</a>
+    <span aria-hidden="true">·</span>
+    <div><div>Na Štípě bude v sobotu farmářský trh.</div><div>Začátek v 8:00.</div></div>
+    <div><span>Všechny reakce:</span><span>12</span></div>
+    <div role="button"><span>To se mi líbí</span></div>
+    <div role="button"><span>Komentář</span></div>
+  </div></div>
+
+</div></div>
+</body></html>
