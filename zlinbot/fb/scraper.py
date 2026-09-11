@@ -1,10 +1,11 @@
 """
 Playwright-скрапер публичных групп Facebook без входа.
 
-Вежливый темп встроен сюда, а не в вызывающий код: одна загрузка за раз
-(asyncio.Lock) и случайная пауза 25–70 с между ЛЮБЫМИ двумя загрузками FB.
-Так «проверить сейчас» из бота встанет в очередь за фоновым кругом, а не пойдёт
-параллельно. Каждая загрузка — новый контекст браузера: без профиля и cookies.
+Вежливый темп встроен сюда, а не в вызывающий код: одна загрузка за раз и случайная
+пауза 25–70 с между ЛЮБЫМИ двумя загрузками FB — в том числе из разных процессов
+(см. pace.py). Так «проверить сейчас» из бота встанет в очередь за фоновым кругом,
+а отладочный scrape.py — за ботом. Каждая загрузка — новый контекст браузера:
+без профиля и cookies.
 
 Что делать с HTML, решает extract.py. Здесь только навигация: cookie-баннер,
 оверлей входа, прокрутка, раскрытие «Zobrazit víc».
@@ -13,8 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +24,7 @@ from playwright.async_api import TimeoutError as PWTimeout
 
 from . import extract
 from . import selectors as sel
+from .pace import DEFAULT_LOCK, PaceLock
 
 log = logging.getLogger(__name__)
 
@@ -91,14 +91,15 @@ _TOUCH_LINKS_JS = """
 
 
 class FacebookScraper:
-    def __init__(self, *, headless: bool = True, debug_dir: Path | None = Path("debug")) -> None:
+    def __init__(self, *, headless: bool = True, debug_dir: Path | None = Path("debug"),
+                 lock_path: Path = DEFAULT_LOCK) -> None:
         self._headless = headless
         self._debug_dir = debug_dir
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._user_agent = ""
-        self._lock = asyncio.Lock()
-        self._last_load: float | None = None
+        self._lock = asyncio.Lock()                            # очередь внутри процесса
+        self._pace = PaceLock(lock_path, PAUSE_BETWEEN_LOADS)  # очередь и пауза между процессами
         self._loads_since_launch = 0
 
     async def __aenter__(self) -> FacebookScraper:
@@ -117,8 +118,7 @@ class FacebookScraper:
     async def fetch_group(self, slug: str, *, group_id: str | None = None,
                           save_html: Path | None = None) -> ScrapeResult:
         """Загрузить ленту группы и извлечь посты. Никогда не бросает исключение."""
-        async with self._lock:
-            await self._pace()
+        async with self._lock, self._pace:
             ctx = await self._new_context()
             try:
                 page = await ctx.new_page()
@@ -145,7 +145,6 @@ class FacebookScraper:
                 return ScrapeResult(slug, "error", error=f"{type(e).__name__}: {e}")
             finally:
                 await ctx.close()
-                self._last_load = time.monotonic()
 
         if save_html:
             save_html.write_text(html, encoding="utf-8")
@@ -157,8 +156,7 @@ class FacebookScraper:
 
     async def fetch_activity(self, slug: str, *, save_html: Path | None = None) -> extract.Activity | None:
         """Счётчик «Dnes N nových příspěvků» со страницы /about. None — не удалось."""
-        async with self._lock:
-            await self._pace()
+        async with self._lock, self._pace:
             ctx = await self._new_context()
             try:
                 page = await ctx.new_page()
@@ -174,7 +172,6 @@ class FacebookScraper:
                 return None
             finally:
                 await ctx.close()
-                self._last_load = time.monotonic()
         if save_html:
             save_html.write_text(html, encoding="utf-8")
         return await asyncio.to_thread(extract.parse_activity, html)
@@ -200,14 +197,6 @@ class FacebookScraper:
         assert self._browser is not None
         return await self._browser.new_context(locale="cs-CZ", timezone_id="Europe/Prague",
                                                user_agent=self._user_agent, viewport=VIEWPORT)
-
-    async def _pace(self) -> None:
-        if self._last_load is None:
-            return
-        wait = random.uniform(*PAUSE_BETWEEN_LOADS) - (time.monotonic() - self._last_load)
-        if wait > 0:
-            log.info("пауза %.0f с перед следующей загрузкой FB", wait)
-            await asyncio.sleep(wait)
 
     async def _decline_cookies(self, page: Page) -> None:
         btn = page.get_by_role("button", name=sel.COOKIE_DECLINE_RE)
