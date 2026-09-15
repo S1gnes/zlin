@@ -119,10 +119,16 @@ CREATE TABLE settings (
 );
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1,)
+# v2: условные запросы для RSS — не тянуть фид целиком, если он не менялся
+_V2 = """
+ALTER TABLE groups ADD COLUMN etag TEXT;
+ALTER TABLE groups ADD COLUMN last_modified TEXT;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2)
 
 _GROUP_COLUMNS = frozenset({"url", "slug", "fb_id", "name", "status", "fail_streak", "last_status",
-                            "last_checked_at", "last_ok_at"})
+                            "last_checked_at", "last_ok_at", "etag", "last_modified"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +145,8 @@ class Group:
     last_checked_at: int | None
     last_ok_at: int | None
     added_at: int
+    etag: str | None = None          # RSS: условный запрос
+    last_modified: str | None = None
 
     @property
     def title(self) -> str:
@@ -237,11 +245,11 @@ class Database:
     # -- группы --------------------------------------------------------------
 
     async def add_group(self, *, kind: str, url: str, slug: str, fb_id: str | None, name: str | None,
-                        now: float) -> Group:
+                        now: float, etag: str | None = None, last_modified: str | None = None) -> Group:
         cur = await self._write(
             "INSERT INTO groups (kind, url, slug, fb_id, name, status, last_status, last_checked_at, "
-            "last_ok_at, added_at) VALUES (?, ?, ?, ?, ?, 'active', 'ok', ?, ?, ?)",
-            (kind, url, slug, fb_id, name, int(now), int(now), int(now)))
+            "last_ok_at, added_at, etag, last_modified) VALUES (?, ?, ?, ?, ?, 'active', 'ok', ?, ?, ?, ?, ?)",
+            (kind, url, slug, fb_id, name, int(now), int(now), int(now), etag, last_modified))
         group = await self.get_group(cur.lastrowid)
         assert group is not None
         return group
