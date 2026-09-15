@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from . import gemini
+
 ROOT = Path(__file__).resolve().parents[1]
 TZ = ZoneInfo("Europe/Prague")  # на Windows требует пакет tzdata
 
@@ -20,6 +22,8 @@ class Config:
     db_path: Path
     debug_dir: Path
     headless: bool
+    gemini_key: str | None       # ключ живёт только в .env и в git не попадает
+    gemini_model: str            # значение по умолчанию; рабочее — в таблице settings
 
 
 def load() -> Config:
@@ -28,4 +32,6 @@ def load() -> Config:
         db_path=Path(os.getenv("DB_PATH") or ROOT / "data" / "zlinbot.db"),
         debug_dir=Path(os.getenv("DEBUG_DIR") or ROOT / "debug"),
         headless=os.getenv("HEADLESS", "1") != "0",
+        gemini_key=(os.getenv("GEMINI_API_KEY") or "").strip() or None,
+        gemini_model=(os.getenv("GEMINI_MODEL") or "").strip() or gemini.DEFAULT_MODEL,
     )

@@ -154,6 +154,21 @@ class Group:
 
 
 @dataclass(frozen=True, slots=True)
+class Draft:
+    id: int
+    post_id: str
+    summary: str
+    summary_ru: str | None
+    facts: list[str]
+    model: str | None
+    status: str
+    admin_msg_id: int | None
+    channel_msg_id: int | None
+    created_at: int
+    decided_at: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class StoredPost:
     post_id: str
     group_id: int | None
@@ -323,7 +338,9 @@ class Database:
         return _post(rows[0]) if rows else None
 
     async def posts(self, *, status: str | None = None, group_id: int | None = None,
-                    limit: int = 20) -> list[StoredPost]:
+                    limit: int = 20, oldest_first: bool = False) -> list[StoredPost]:
+        """oldest_first=True — очередь на обработку: иначе при длинном хвосте
+        каждый круг брались бы самые свежие, а старые не разобрались бы никогда."""
         where, params = [], []
         if status:
             where.append("status = ?")
@@ -332,12 +349,48 @@ class Database:
             where.append("group_id = ?")
             params.append(group_id)
         sql = "SELECT * FROM posts" + (f" WHERE {' AND '.join(where)}" if where else "")
-        rows = await self._rows(sql + " ORDER BY seen_at DESC, post_id LIMIT ?", (*params, limit))
+        order = "seen_at, post_id" if oldest_first else "seen_at DESC, post_id"
+        rows = await self._rows(f"{sql} ORDER BY {order} LIMIT ?", (*params, limit))
         return [_post(r) for r in rows]
 
     async def post_status_counts(self) -> dict[str, int]:
         rows = await self._rows("SELECT status, COUNT(*) FROM posts GROUP BY status")
         return {r[0]: r[1] for r in rows}
+
+    # -- черновики -----------------------------------------------------------
+
+    async def add_draft(self, *, post_id: str, summary: str, summary_ru: str | None,
+                        facts: Iterable[str], model: str | None, now: float) -> int:
+        cur = await self._write(
+            "INSERT INTO drafts (post_id, summary, summary_ru, facts_json, model, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (post_id, summary, summary_ru, json.dumps(list(facts), ensure_ascii=False), model, int(now)))
+        return int(cur.lastrowid)
+
+    async def get_draft(self, draft_id: int) -> Draft | None:
+        rows = await self._rows("SELECT * FROM drafts WHERE id = ?", (draft_id,))
+        return _draft(rows[0]) if rows else None
+
+    async def drafts(self, *, status: str | None = "pending", limit: int = 20) -> list[Draft]:
+        sql = "SELECT * FROM drafts" + (" WHERE status = ?" if status else "")
+        params = (status,) if status else ()
+        rows = await self._rows(sql + " ORDER BY created_at, id LIMIT ?", (*params, limit))
+        return [_draft(r) for r in rows]
+
+    async def set_draft_status(self, draft_id: int, status: str, *, expect: Iterable[str] | None = None,
+                               now: float | None = None, **fields: Any) -> bool:
+        """expect — атомарная проверка текущего статуса: защита от двойного нажатия «опубликовать»."""
+        bad = set(fields) - {"admin_msg_id", "channel_msg_id"}
+        if bad:
+            raise ValueError(f"нельзя обновить колонки drafts: {bad}")
+        sets = "".join(f", {k} = ?" for k in fields)
+        params: list[Any] = [status, int(now or time.time()), *fields.values(), draft_id]
+        sql = f"UPDATE drafts SET status = ?, decided_at = ?{sets} WHERE id = ?"
+        if expect is not None:
+            ex = tuple(expect)
+            sql += f" AND status IN ({','.join('?' * len(ex))})"
+            params += ex
+        return (await self._write(sql, params)).rowcount == 1
 
     # -- статистика ----------------------------------------------------------
 
@@ -399,6 +452,12 @@ class Database:
         await self._write("INSERT INTO settings (key, value) VALUES (?, ?) "
                           "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                           (key, json.dumps(value, ensure_ascii=False)))
+
+
+def _draft(row: aiosqlite.Row) -> Draft:
+    d = dict(row)
+    d["facts"] = json.loads(d.pop("facts_json") or "[]")
+    return Draft(**d)
 
 
 def _post(row: aiosqlite.Row) -> StoredPost:

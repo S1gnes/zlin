@@ -9,6 +9,11 @@
     collect.py posts [--status S] [--limit N]
     collect.py stats               события за сутки и неделю, покрытие по дням
     collect.py pause|resume|delete ID
+
+    collect.py process [--limit N] разобрать накопленное: стоп-слова -> Gemini -> черновики
+    collect.py drafts              очередь готовых черновиков
+    collect.py filters [--add СЛОВО] [--rm ID]
+    collect.py models              реальный список моделей у API Gemini
 """
 from __future__ import annotations
 
@@ -28,6 +33,8 @@ from zlinbot.collector import KIND_TEXT, STATUS_TEXT, Collector, RoundReport, fm
 from zlinbot.db import Database, day_bounds  # noqa: E402
 from zlinbot.fb import extract  # noqa: E402
 from zlinbot.fb.scraper import FacebookScraper  # noqa: E402
+from zlinbot.gemini import Gemini, GeminiError  # noqa: E402
+from zlinbot.pipeline import Processor, current_model  # noqa: E402
 from zlinbot.rss import RssFetcher  # noqa: E402
 
 EVENT_TEXT = {
@@ -91,6 +98,78 @@ async def cmd_stats(db: Database) -> None:
                   f"{peak if peak is not None else '?'} -> {cov}")
 
 
+async def cmd_process(db: Database, cfg, limit: int) -> None:
+    if not cfg.gemini_key:
+        print("Нет ключа. Положи GEMINI_API_KEY=... в файл .env рядом с проектом (образец — .env.example).")
+        return
+    model = await current_model(db, cfg.gemini_model)
+    async with Gemini(cfg.gemini_key, model=model) as gemini:
+        report = await Processor(db, gemini, limit=limit).run()
+    for d in report.decisions:
+        head = f"[{d.status}] {d.post.post_id}"
+        if d.note:
+            head += f" — {d.note}"
+        print(head)
+        print(f"    исходник: {(d.post.text or '').splitlines()[0][:110] if d.post.text else '—'}")
+        if d.verdict and d.status == "pending":
+            print(f"    черновик #{d.draft_id} (модель {d.verdict.model})")
+            print(f"    cs: {d.verdict.post}")
+            print(f"    ru: {d.verdict.post_ru}")
+            print(f"    факты: {'; '.join(d.verdict.facts) or '—'}")
+    for a in report.alerts:
+        print(a)
+    if not report.decisions and not report.alerts:
+        print("Нечего разбирать: записей со статусом new нет.")
+    else:
+        print(f"\nитого: черновиков {report.count('pending')}, отсеяно стоп-словами "
+              f"{report.count('filtered')}, Gemini skip {report.count('skipped')}, "
+              f"сломалось {report.count('failed')}")
+
+
+async def cmd_drafts(db: Database) -> None:
+    drafts = await db.drafts(status="pending", limit=50)
+    if not drafts:
+        print("Очередь пуста.")
+    for d in drafts:
+        post = await db.get_post(d.post_id)
+        print(f"#{d.id} от {fmt_local(d.created_at)} (модель {d.model})"
+              f"\n    cs: {d.summary}"
+              f"\n    ru: {d.summary_ru or '—'}"
+              f"\n    факты: {'; '.join(d.facts) or '—'}"
+              f"\n    оригинал: {post.permalink if post else '—'}")
+
+
+async def cmd_filters(db: Database, add: str | None, rm: int | None) -> None:
+    if add:
+        from zlinbot import filters as flt
+        if not flt.is_valid(add):
+            print(f"Слишком короткое слово: «{add}». Минимум {flt.MIN_WORD} буквы, иначе будет ловить лишнее.")
+        else:
+            print(f"Добавлено: «{add}»" if await db.add_filter(add) else f"Уже есть: «{add}»")
+    if rm is not None:
+        print("Удалено" if await db.remove_filter(rm) else "Нет такого стоп-слова")
+    rows = await db.list_filters()
+    print("Стоп-слова:" if rows else "Стоп-слов нет.")
+    for fid, word, norm in rows:
+        print(f"  #{fid} {word}" + (f"  (сравнивается как «{norm}»)" if norm != word.lower() else ""))
+
+
+async def cmd_models(db: Database, cfg) -> None:
+    if not cfg.gemini_key:
+        print("Нет ключа. Положи GEMINI_API_KEY=... в .env")
+        return
+    current = await current_model(db, cfg.gemini_model)
+    try:
+        async with Gemini(cfg.gemini_key, model=current) as gemini:
+            names = await gemini.list_models()
+    except GeminiError as e:
+        print(f"API не ответил: {e}")
+        return
+    print(f"Сейчас выбрана: {current}" + ("" if current in names else "  ← её НЕТ в списке API!"))
+    for name in names:
+        print(("  * " if name == current else "    ") + name)
+
+
 def needs_browser(cmd: str, url: str | None, groups: list) -> bool:
     """Chromium поднимаем, только если в деле правда есть Facebook."""
     if cmd == "add":
@@ -109,6 +188,14 @@ async def main_async(args: argparse.Namespace) -> None:
             return await cmd_posts(db, args.status, args.limit)
         if args.cmd == "stats":
             return await cmd_stats(db)
+        if args.cmd == "process":
+            return await cmd_process(db, cfg, args.limit)
+        if args.cmd == "drafts":
+            return await cmd_drafts(db)
+        if args.cmd == "filters":
+            return await cmd_filters(db, args.add, args.rm)
+        if args.cmd == "models":
+            return await cmd_models(db, cfg)
         if args.cmd in ("pause", "resume"):
             await db.update_group(args.id, status="paused" if args.cmd == "pause" else "active", fail_streak=0)
             return await cmd_list(db)
@@ -161,7 +248,17 @@ def main() -> None:
     posts.add_argument("--status")
     posts.add_argument("--limit", type=int, default=20)
     sub.add_parser("stats", help="статистика и покрытие", parents=[common])
+    process = sub.add_parser("process", help="разобрать накопленное через Gemini", parents=[common])
+    process.add_argument("--limit", type=int, default=None, help="сколько записей за раз (по умолчанию 8)")
+    sub.add_parser("drafts", help="очередь черновиков", parents=[common])
+    flt = sub.add_parser("filters", help="стоп-слова", parents=[common])
+    flt.add_argument("--add", metavar="СЛОВО")
+    flt.add_argument("--rm", type=int, metavar="ID")
+    sub.add_parser("models", help="список моделей Gemini", parents=[common])
     args = ap.parse_args()
+    if getattr(args, "limit", None) is None and args.cmd == "process":
+        from zlinbot.pipeline import MAX_PER_ROUND
+        args.limit = MAX_PER_ROUND
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("aiosqlite").setLevel(logging.WARNING)
