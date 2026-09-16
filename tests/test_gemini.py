@@ -213,3 +213,19 @@ async def test_list_models_reports_bad_key():
     async with gemini(lambda r: error(403, "API key not valid")) as g:
         with pytest.raises(GeminiBadRequest):
             await g.list_models()
+
+
+async def test_404_model_gone_is_a_settings_problem_not_a_retry():
+    """Вживую 16.09.2026: gemini-2.5-flash есть в списке моделей, но на запрос отвечает 404
+    «no longer available to new users». Ретраить и помечать записи сломанными нельзя."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return error(404, "This model models/gemini-2.5-flash is no longer available to new users. "
+                          "Please update your code to use models/gemini-3.6-flash")
+
+    async with gemini(handler) as g:
+        with pytest.raises(GeminiBadRequest) as e:
+            await g.summarize("x")
+    assert len(calls) == 1 and "gemini-3.6-flash" in str(e.value)

@@ -360,6 +360,12 @@ class Database:
         rows = await self._rows(f"{sql} ORDER BY {order} LIMIT ?", (*params, limit))
         return [_post(r) for r in rows]
 
+    async def requeue_posts(self, status: str = "failed", *, now: float | None = None) -> int:
+        """Вернуть записи в очередь: после починки настроек их надо разобрать заново."""
+        cur = await self._write("UPDATE posts SET status = 'new', note = NULL, status_at = ? WHERE status = ?",
+                                (int(now or time.time()), status))
+        return cur.rowcount
+
     async def post_status_counts(self) -> dict[str, int]:
         rows = await self._rows("SELECT status, COUNT(*) FROM posts GROUP BY status")
         return {r[0]: r[1] for r in rows}

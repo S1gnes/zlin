@@ -12,6 +12,7 @@
 
     collect.py process [--limit N] разобрать накопленное: стоп-слова -> Gemini -> черновики
     collect.py drafts              очередь готовых черновиков
+    collect.py requeue [--status failed]   вернуть записи в очередь после починки настроек
     collect.py filters [--add СЛОВО] [--rm ID]
     collect.py models              реальный список моделей у API Gemini
 """
@@ -190,6 +191,9 @@ async def main_async(args: argparse.Namespace) -> None:
             return await cmd_stats(db)
         if args.cmd == "process":
             return await cmd_process(db, cfg, args.limit)
+        if args.cmd == "requeue":
+            print(f"вернул в очередь записей: {await db.requeue_posts(args.status)}")
+            return None
         if args.cmd == "drafts":
             return await cmd_drafts(db)
         if args.cmd == "filters":
@@ -251,6 +255,8 @@ def main() -> None:
     process = sub.add_parser("process", help="разобрать накопленное через Gemini", parents=[common])
     process.add_argument("--limit", type=int, default=None, help="сколько записей за раз (по умолчанию 8)")
     sub.add_parser("drafts", help="очередь черновиков", parents=[common])
+    requeue = sub.add_parser("requeue", help="вернуть записи в очередь на разбор", parents=[common])
+    requeue.add_argument("--status", default="failed", help="какой статус возвращать (по умолчанию failed)")
     flt = sub.add_parser("filters", help="стоп-слова", parents=[common])
     flt.add_argument("--add", metavar="СЛОВО")
     flt.add_argument("--rm", type=int, metavar="ID")

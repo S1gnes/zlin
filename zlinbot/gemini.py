@@ -292,8 +292,10 @@ def _error_for(r: httpx.Response) -> GeminiError:
         return GeminiRetryable(f"429: {message}")
     if r.status_code in (500, 502, 503, 504):
         return GeminiRetryable(f"{r.status_code}: {message}")
-    if r.status_code == 400:
-        return GeminiBadRequest(f"400: {message}")
+    if r.status_code in (400, 404):
+        # 404 — модель снята или недоступна этому ключу. Ретраи и пометка записей
+        # «сломано» тут вредны: виновата настройка, а не запись.
+        return GeminiBadRequest(f"{r.status_code}: {message}")
     if r.status_code in (401, 403):
         return GeminiBadRequest(f"{r.status_code}: ключ не принят — {message}")
     return GeminiError(f"{r.status_code}: {message}")
