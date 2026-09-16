@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import logging.handlers
 import signal
 import sys
 import time
@@ -42,6 +43,8 @@ log = logging.getLogger("zlinbot.run")
 PROCESS_EVERY = 5 * 60       # как часто разбирать накопленное
 COLLECT_EVERY = 20 * 60      # запасной интервал: обычно его задаёт сам круг сбора
 MEDIA_TTL = 3 * 24 * 3600    # файлы черновиков без решения дольше этого — в утиль
+LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
+LOG_BYTES = 2 * 1024 * 1024  # по 2 МБ на файл, три штуки: хватает на несколько дней
 
 COMMANDS = [
     BotCommand(command="pending", description="очередь черновиков"),
@@ -164,8 +167,20 @@ def _stop_signal() -> asyncio.Event:
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-                        datefmt="%H:%M:%S")
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%d.%m %H:%M:%S")
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    handlers: list[logging.Handler] = [console]
+    try:
+        # Лог на диске: окно бота можно закрыть или не заметить, а разбираться потом по чему-то надо
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        rotating = logging.handlers.RotatingFileHandler(LOG_DIR / "zlinbot.log", maxBytes=LOG_BYTES,
+                                                        backupCount=2, encoding="utf-8")
+        rotating.setFormatter(fmt)
+        handlers.append(rotating)
+    except OSError as e:  # диск только для чтения и подобное — консоль всё равно остаётся
+        print(f"не смог открыть файл лога: {e}")
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
