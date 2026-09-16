@@ -125,7 +125,13 @@ ALTER TABLE groups ADD COLUMN etag TEXT;
 ALTER TABLE groups ADD COLUMN last_modified TEXT;
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2)
+# v3: id комментария с переводом — чтобы не оставить его дважды после перезапуска
+_V3 = """
+ALTER TABLE drafts ADD COLUMN comment_msg_id INTEGER;
+CREATE INDEX drafts_channel_msg ON drafts(channel_msg_id) WHERE channel_msg_id IS NOT NULL;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3)
 
 _GROUP_COLUMNS = frozenset({"url", "slug", "fb_id", "name", "status", "fail_streak", "last_status",
                             "last_checked_at", "last_ok_at", "etag", "last_modified"})
@@ -166,6 +172,7 @@ class Draft:
     channel_msg_id: int | None
     created_at: int
     decided_at: int | None
+    comment_msg_id: int | None = None   # комментарий с переводом в группе обсуждений
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,10 +384,24 @@ class Database:
         rows = await self._rows(sql + " ORDER BY created_at, id LIMIT ?", (*params, limit))
         return [_draft(r) for r in rows]
 
+    async def draft_by_channel_msg(self, channel_msg_id: int) -> Draft | None:
+        """Черновик по номеру поста в канале: так служебная пересылка в группу обсуждений
+        находит, к чему приписать перевод, даже если бота перезапустили."""
+        rows = await self._rows("SELECT * FROM drafts WHERE channel_msg_id = ? LIMIT 1", (channel_msg_id,))
+        return _draft(rows[0]) if rows else None
+
+    async def set_draft_message(self, draft_id: int, admin_msg_id: int) -> None:
+        """Запомнить карточку в личке, не трогая статус: по ней потом убираются кнопки."""
+        await self._write("UPDATE drafts SET admin_msg_id = ? WHERE id = ?", (admin_msg_id, draft_id))
+
+    async def set_draft_comment(self, draft_id: int, comment_msg_id: int) -> bool:
+        return (await self._write("UPDATE drafts SET comment_msg_id = ? WHERE id = ? AND comment_msg_id IS NULL",
+                                  (comment_msg_id, draft_id))).rowcount == 1
+
     async def set_draft_status(self, draft_id: int, status: str, *, expect: Iterable[str] | None = None,
                                now: float | None = None, **fields: Any) -> bool:
         """expect — атомарная проверка текущего статуса: защита от двойного нажатия «опубликовать»."""
-        bad = set(fields) - {"admin_msg_id", "channel_msg_id"}
+        bad = set(fields) - {"admin_msg_id", "channel_msg_id", "comment_msg_id"}
         if bad:
             raise ValueError(f"нельзя обновить колонки drafts: {bad}")
         sets = "".join(f", {k} = ?" for k in fields)

@@ -66,7 +66,7 @@ PROMPT = """Ты редактор телеграм-канала о жизни г
 6. Не называй по имени частных лиц. Названия организаций, должности и публичные лица — можно.
 7. Если запись каналу не подходит, "skip": true, а "post", "post_ru" и "facts" — пустые.
 
-ИСТОЧНИК: {source}
+{extra}ИСТОЧНИК: {source}
 ЗАПИСЬ:
 \"\"\"
 {text}
@@ -175,8 +175,12 @@ def _clean(value: object) -> str:
     return " ".join(str(value).split()) if isinstance(value, (str, int, float)) else ""
 
 
-def build_prompt(text: str, *, source: str, criteria: str = DEFAULT_CRITERIA) -> str:
-    return PROMPT.format(criteria=criteria.strip(), source=source or "неизвестен", text=text.strip())
+def build_prompt(text: str, *, source: str, criteria: str = DEFAULT_CRITERIA, extra: str = "") -> str:
+    """extra — разовое указание редактора при переписывании («короче», «убери цены»)."""
+    note = (f"ОТДЕЛЬНОЕ УКАЗАНИЕ РЕДАКТОРА (важнее общих правил стиля): {extra.strip()}\n\n"
+            if extra.strip() else "")
+    return PROMPT.format(criteria=criteria.strip(), source=source or "неизвестен",
+                         text=text.strip(), extra=note)
 
 
 class Gemini:
@@ -209,8 +213,9 @@ class Gemini:
         return sorted(m["name"].removeprefix("models/") for m in r.json().get("models", [])
                       if "generateContent" in m.get("supportedGenerationMethods", []))
 
-    async def summarize(self, text: str, *, source: str = "", criteria: str = DEFAULT_CRITERIA) -> Verdict:
-        prompt = build_prompt(text, source=source, criteria=criteria)
+    async def summarize(self, text: str, *, source: str = "", criteria: str = DEFAULT_CRITERIA,
+                        extra: str = "") -> Verdict:
+        prompt = build_prompt(text, source=source, criteria=criteria, extra=extra)
         body = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {

@@ -52,7 +52,8 @@ class Summarizer:
 
     model: str
 
-    async def summarize(self, text: str, *, source: str = "", criteria: str = DEFAULT_CRITERIA) -> Verdict: ...
+    async def summarize(self, text: str, *, source: str = "", criteria: str = DEFAULT_CRITERIA,
+                        extra: str = "") -> Verdict: ...
 
 
 class Processor:
@@ -135,6 +136,28 @@ class Processor:
             return ""
         group = await self.db.get_group(post.group_id)
         return group.title if group else ""
+
+
+async def rewrite_draft(db: Database, gemini: Summarizer, draft_id: int, *, instruction: str = "",
+                        clock: Callable[[], float] = time.time) -> int | None:
+    """Переписать черновик: новая версия — новая строка, старая помечается superseded.
+    None — модель на этот раз решила, что запись каналу не подходит."""
+    draft = await db.get_draft(draft_id)
+    post = await db.get_post(draft.post_id) if draft else None
+    if draft is None or post is None or draft.status != "pending":
+        return None
+    group = await db.get_group(post.group_id) if post.group_id else None
+    text = "\n".join(part for part in (post.text, post.shared_text) if part)
+    criteria = await db.get_setting("relevance", DEFAULT_CRITERIA)
+    verdict = await gemini.summarize(text, source=group.title if group else "", criteria=criteria,
+                                     extra=instruction)
+    if verdict.skip or not verdict.post:
+        return None
+    new_id = await db.add_draft(post_id=post.post_id, summary=verdict.post,
+                                summary_ru=verdict.post_ru or None, facts=verdict.facts,
+                                model=verdict.model, now=clock())
+    await db.set_draft_status(draft_id, "superseded", expect=["pending"], now=clock())
+    return new_id
 
 
 async def current_model(db: Database, default: str = DEFAULT_MODEL) -> str:

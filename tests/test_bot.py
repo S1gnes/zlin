@@ -1,0 +1,250 @@
+"""Кнопки черновика — прогоном апдейтов через настоящий диспетчер с моком бота."""
+import pytest
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import SendMessage
+
+from mock_bot import (ADMIN_ID, CHANNEL_ID, DISCUSSION_ID, STRANGER_ID, callback_update, forward_update,
+                      make_bot, message_update)
+from zlinbot.bot.app import build_dispatcher
+from zlinbot.bot.publisher import Publisher
+from zlinbot.db import Database
+from zlinbot.gemini import Verdict
+
+T0 = 1_789_000_000
+REWRITTEN = Verdict(False, "Kratší verze.", "Короче.", ("fakt",), model="gemini-2.5-flash")
+
+
+class FakeGemini:
+    model = "gemini-2.5-flash"
+
+    def __init__(self, answer=REWRITTEN):
+        self.answer = answer
+        self.calls: list[str] = []
+
+    async def summarize(self, text, *, source="", criteria="", extra=""):
+        self.calls.append(extra)
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+@pytest.fixture
+async def env(tmp_path):
+    async with Database(tmp_path / "t.db") as db:
+        await db.add_group(kind="rss", url="https://zlin.cz/feed/", slug="https://zlin.cz/feed/",
+                           fb_id=None, name="ZLIN.CZ", now=T0)
+        await db.insert_post(post_id="rss:a", group_id=1, permalink="https://zlin.cz/zpravy/a/",
+                             author="Redakce", text="Uzavírka na třídě Tomáše Bati od 20. září.",
+                             shared_text=None, media=[], created_at=T0, status="pending",
+                             text_hash=None, now=T0)
+        draft_id = await db.add_draft(post_id="rss:a", summary="Uzavírka potrvá do 30. října.",
+                                      summary_ru="Перекрытие продлится до 30 октября.",
+                                      facts=["od 20. září"], model="gemini-2.5-flash", now=T0)
+        bot, session = make_bot()
+        gemini = FakeGemini()
+        yield db, bot, session, gemini, draft_id
+
+
+def dispatcher(db, bot, gemini, *, discussion=None, session=None):
+    publisher = Publisher(bot, db, CHANNEL_ID, channel_username="zlin_kanal",
+                          discussion_chat_id=discussion, clock=lambda: T0)
+    return build_dispatcher(db, publisher, gemini, admin_id=ADMIN_ID, discussion_chat_id=discussion)
+
+
+# -- доступ --------------------------------------------------------------------
+
+async def test_stranger_cannot_press_any_button(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    for action in ("publish", "reject", "rewrite", "again"):
+        await dp.feed_update(bot, callback_update(f"d:{action}:{draft_id}", user_id=STRANGER_ID))
+    assert session.count("SendMessage") == 0                       # в канал ничего не ушло
+    assert (await db.get_draft(draft_id)).status == "pending"
+    answers = [c for c in session.calls if type(c).__name__ == "AnswerCallbackQuery"]
+    assert len(answers) == 4 and all("только владельца" in a.text for a in answers)
+
+
+async def test_stranger_commands_are_ignored(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, message_update("/pending", user_id=STRANGER_ID))
+    assert session.calls == []
+
+
+async def test_owner_sees_the_queue(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, message_update("/pending"))
+    texts = [c.text for c in session.calls if isinstance(c, SendMessage)]
+    assert "Черновиков в очереди: 1" in texts[0]
+    assert "Uzavírka potrvá" in texts[1] and "Перекрытие продлится" in texts[1]
+    assert "od 20. září" in texts[1]                                 # факты для сверки
+    card = session.last("SendMessage")
+    buttons = [b.text for row in card.reply_markup.inline_keyboard for b in row]
+    assert buttons == ["✅ Опубликовать", "✏️ Переписать", "🚫 Отклонить", "🔗 Оригинал"]
+    assert (await db.get_draft(draft_id)).admin_msg_id is not None
+
+
+# -- публикация ----------------------------------------------------------------
+
+async def test_publish_posts_to_channel_in_the_required_format(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+
+    post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
+    assert post.text.startswith("Uzavírka potrvá do 30. října.")
+    assert "📍 ZLIN.CZ" in post.text and "🔗 https://zlin.cz/zpravy/a/" in post.text
+    assert post.link_preview_options.is_disabled is True
+    assert (await db.get_draft(draft_id)).status == "published"
+    assert (await db.get_post("rss:a")).status == "published"
+    assert (await db.event_counts(0)).get("published") == 1
+    assert "t.me/zlin_kanal/" in session.last("SendMessage").text   # ссылка на пост владельцу
+
+
+async def test_second_press_does_not_publish_twice(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    to_channel = sum(1 for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
+
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}", update_id=2))
+    assert sum(1 for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID) == to_channel
+    answer = [c for c in session.calls if type(c).__name__ == "AnswerCallbackQuery"][-1]
+    assert "уже опубликован" in answer.text
+
+
+async def test_telegram_refusal_returns_draft_to_the_queue(env):
+    db, bot, session, gemini, draft_id = env
+    session.set_error("SendMessage", TelegramBadRequest(method=SendMessage(chat_id=1, text="x"),
+                                                        message="CHAT_WRITE_FORBIDDEN"))
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    assert (await db.get_draft(draft_id)).status == "pending"       # можно нажать ещё раз
+    assert (await db.get_post("rss:a")).status == "pending"
+
+
+async def test_without_discussion_group_translation_goes_under_spoiler(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini, discussion=None)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
+    assert "<tg-spoiler>🇷🇺 Перекрытие продлится до 30 октября.</tg-spoiler>" in post.text
+
+
+async def test_with_discussion_group_translation_goes_as_first_comment(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini, discussion=DISCUSSION_ID)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
+    assert "tg-spoiler" not in post.text                            # перевод пойдёт комментарием
+    channel_msg_id = (await db.get_draft(draft_id)).channel_msg_id
+
+    await dp.feed_update(bot, forward_update(channel_msg_id, update_id=2))
+    comment = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == DISCUSSION_ID)
+    assert comment.text == "🇷🇺 Перекрытие продлится до 30 октября."
+    assert comment.reply_parameters.message_id == 7001
+    assert (await db.get_draft(draft_id)).comment_msg_id is not None
+
+    before = session.count("SendMessage")                           # повторная пересылка — не второй комментарий
+    await dp.feed_update(bot, forward_update(channel_msg_id, update_id=3))
+    assert session.count("SendMessage") == before
+
+
+# -- отклонение и переписывание ------------------------------------------------
+
+async def test_reject_marks_draft_and_post(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, callback_update(f"d:reject:{draft_id}"))
+    assert (await db.get_draft(draft_id)).status == "rejected"
+    assert (await db.get_post("rss:a")).status == "rejected"
+    assert session.count("EditMessageReplyMarkup") == 1             # кнопки убраны
+    assert (await db.event_counts(0)).get("rejected") == 1
+
+
+async def test_rewrite_asks_what_to_change_then_regenerates(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, callback_update(f"d:rewrite:{draft_id}"))
+    question = session.last("SendMessage")
+    assert "Что поправить" in question.text
+    assert question.reply_markup.inline_keyboard[0][0].text == "🔁 Просто заново"
+
+    await dp.feed_update(bot, message_update("сделай короче и без цен", update_id=2))
+    assert gemini.calls == ["сделай короче и без цен"]               # указание дошло до модели
+    assert (await db.get_draft(draft_id)).status == "superseded"
+    new_draft = (await db.drafts(status="pending"))[0]
+    assert new_draft.summary == "Kratší verze." and new_draft.id != draft_id
+    assert "Kratší verze." in session.last("SendMessage").text
+
+
+async def test_rewrite_again_button_regenerates_without_instruction(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, callback_update(f"d:rewrite:{draft_id}"))
+    await dp.feed_update(bot, callback_update(f"d:again:{draft_id}", update_id=2))
+    assert gemini.calls == [""]
+    assert (await db.drafts(status="pending"))[0].summary == "Kratší verze."
+
+
+async def test_plain_message_without_rewrite_state_is_not_treated_as_instruction(env):
+    db, bot, session, gemini, draft_id = env
+    dp = dispatcher(db, bot, gemini)
+    await dp.feed_update(bot, message_update("просто болтовня"))
+    assert gemini.calls == []
+    assert (await db.get_draft(draft_id)).status == "pending"
+
+# -- проверки при старте -------------------------------------------------------
+
+from aiogram.types import Chat, ChatMemberAdministrator, ChatMemberMember, User  # noqa: E402
+
+from zlinbot.bot.app import check_channel, startup_report  # noqa: E402
+
+BOT_USER = User(id=424242, is_bot=True, first_name="zlinbot")
+
+
+def member(status: str, *, can_post: bool = True):
+    if status != "administrator":
+        return ChatMemberMember(user=BOT_USER, status="member")
+    # model_construct — чтобы не перечислять полтора десятка прав, которые тесту не нужны
+    return ChatMemberAdministrator.model_construct(user=BOT_USER, status="administrator",
+                                                   can_post_messages=can_post)
+
+
+async def startup(*, linked: int | None, in_channel: str = "administrator",
+                  in_group: str = "administrator", can_post: bool = True):
+    bot, session = make_bot()
+    session.set_response("GetChat", Chat(id=CHANNEL_ID, type="channel", title="Zlín kanál",
+                                         username="zlin_kanal", linked_chat_id=linked))
+    session.set_response("GetMe", BOT_USER)
+    session.set_response("GetChatMember", [member(in_channel, can_post=can_post), member(in_group)])
+    info = await check_channel(bot, CHANNEL_ID)
+    return info, startup_report(info)
+
+
+async def test_startup_warns_when_no_discussion_group():
+    info, report = await startup(linked=None)
+    assert info.discussion_chat_id is None
+    assert "под спойлером" in report and "⚠️" in report
+
+
+async def test_startup_is_quiet_when_everything_is_fine():
+    info, report = await startup(linked=DISCUSSION_ID)
+    assert info.discussion_chat_id == DISCUSSION_ID
+    assert "Проблем не вижу" in report and "первым комментарием" in report
+
+
+async def test_startup_warns_when_bot_is_not_channel_admin():
+    _, report = await startup(linked=DISCUSSION_ID, in_channel="member")
+    assert "не администратор канала" in report
+
+
+async def test_startup_warns_when_bot_cannot_post():
+    _, report = await startup(linked=DISCUSSION_ID, can_post=False)
+    assert "нет права публиковать" in report
+
+
+async def test_startup_warns_when_bot_is_not_admin_in_discussion_group():
+    _, report = await startup(linked=DISCUSSION_ID, in_group="member")
+    assert "в группе обсуждений не администратор" in report
