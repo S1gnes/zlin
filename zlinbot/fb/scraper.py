@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ MAX_SEE_MORE_CLICKS = 30
 RELAUNCH_EVERY = 50                  # перезапуск Chromium против утечек памяти в долгой работе
 VIEWPORT = {"width": 1280, "height": 2400}
 DEBUG_KEEP = 60                      # сколько последних HTML-дампов хранить
+LAUNCH_RETRY = 600                   # не пробовать поднять браузер чаще раза в 10 минут
 
 Status = Literal["ok", "login_wall", "checkpoint", "no_feed", "no_articles", "no_ids", "error"]
 
@@ -278,20 +280,38 @@ class LazyFacebookScraper:
         self._kwargs = kwargs
         self._inner: FacebookScraper | None = None
         self._lock = asyncio.Lock()
+        self._error: str | None = None      # браузер не поднялся — помним, чтобы не пробовать каждый круг
+        self._error_at = 0.0
 
-    async def _scraper(self) -> FacebookScraper:
+    async def _scraper(self) -> FacebookScraper | None:
+        """None — браузера нет. В образе для Render Chromium не ставится: с датацентрового
+        адреса Facebook всё равно закрыт, а образ меньше на полгигабайта."""
         async with self._lock:
-            if self._inner is None:
+            if self._inner is not None:
+                return self._inner
+            if self._error and time.monotonic() - self._error_at < LAUNCH_RETRY:
+                return None
+            try:
                 log.info("поднимаю Chromium: понадобился Facebook")
                 self._inner = await FacebookScraper(**self._kwargs).__aenter__()  # type: ignore[arg-type]
+            except Exception as e:  # noqa: BLE001 — это не повод ронять круг сбора
+                self._error = (f"Chromium не запускается ({type(e).__name__}: {e}). "
+                               f"Если это Render — в образе его нет, собери с INSTALL_CHROMIUM=true.")
+                self._error_at = time.monotonic()
+                log.error("%s", self._error)
+                return None
         return self._inner
 
     async def fetch_group(self, slug: str, *, group_id: str | None = None,
                           save_html: Path | None = None) -> ScrapeResult:
-        return await (await self._scraper()).fetch_group(slug, group_id=group_id, save_html=save_html)
+        scraper = await self._scraper()
+        if scraper is None:
+            return ScrapeResult(slug, "error", error=self._error)
+        return await scraper.fetch_group(slug, group_id=group_id, save_html=save_html)
 
     async def fetch_activity(self, slug: str, *, save_html: Path | None = None) -> extract.Activity | None:
-        return await (await self._scraper()).fetch_activity(slug, save_html=save_html)
+        scraper = await self._scraper()
+        return await scraper.fetch_activity(slug, save_html=save_html) if scraper else None
 
     async def close(self) -> None:
         if self._inner is not None:

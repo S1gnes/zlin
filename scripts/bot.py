@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import signal
 import sys
 import time
 from pathlib import Path
@@ -131,12 +132,34 @@ async def main_async() -> None:
 
         background = asyncio.create_task(supervisor.run_forever(), name="supervisor")
         log.info("бот запущен, владелец %s, канал %s", cfg.admin_id, info.title or cfg.channel_id)
+        polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False), name="polling")
+        stop = _stop_signal()
         try:
-            await dp.start_polling(bot, handle_signals=False)
+            await asyncio.wait([polling, asyncio.create_task(stop.wait())],
+                               return_when=asyncio.FIRST_COMPLETED)
+            if not polling.done():
+                # Render шлёт SIGTERM и через 30 с добивает SIGKILL. Закрываем опрос сами:
+                # брошенное соединение getUpdates ещё минуту мешает новому экземпляру.
+                log.info("получен сигнал остановки — закрываю опрос Telegram")
+                dp.stop_polling()
+                await polling
         finally:
             background.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await background
+
+
+def _stop_signal() -> asyncio.Event:
+    """Событие, которое взводится по SIGTERM/SIGINT. На Windows add_signal_handler
+    не реализован, поэтому там обычный signal.signal."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, AttributeError):
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
+    return stop
 
 
 def main() -> None:
