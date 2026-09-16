@@ -20,9 +20,13 @@ from zlinbot import config  # noqa: E402
 from zlinbot.bot.app import build_dispatcher, check_channel, make_bot, startup_report  # noqa: E402
 from zlinbot.bot.handlers import send_draft  # noqa: E402
 from zlinbot.bot.publisher import Publisher  # noqa: E402
+from aiogram.types import BotCommand  # noqa: E402
+from zlinbot.collector import Collector  # noqa: E402
 from zlinbot.db import Database  # noqa: E402
+from zlinbot.fb.scraper import LazyFacebookScraper  # noqa: E402
 from zlinbot.gemini import Gemini  # noqa: E402
 from zlinbot.media import MediaStore  # noqa: E402
+from zlinbot.rss import RssFetcher  # noqa: E402
 from zlinbot.pipeline import current_model  # noqa: E402
 
 log = logging.getLogger("zlinbot.run")
@@ -47,11 +51,25 @@ async def main_async() -> None:
             log.warning("нет GEMINI_API_KEY — кнопка «Переписать» работать не будет")
 
         store = await stack.enter_async_context(MediaStore(cfg.media_dir))
+        scraper = await stack.enter_async_context(
+            LazyFacebookScraper(headless=cfg.headless, debug_dir=cfg.debug_dir))
+        feeds = await stack.enter_async_context(RssFetcher())
+        collector = Collector(db, scraper, feeds)
         info = await check_channel(bot, cfg.channel_id)
         publisher = Publisher(bot, db, cfg.channel_id, channel_username=info.username,
                               discussion_chat_id=info.discussion_chat_id, store=store)
         dp = build_dispatcher(db, publisher, gemini, admin_id=cfg.admin_id,
-                              discussion_chat_id=info.discussion_chat_id, store=store)
+                              discussion_chat_id=info.discussion_chat_id, store=store,
+                              collector=collector)
+        await bot.set_my_commands([
+            BotCommand(command="pending", description="очередь черновиков"),
+            BotCommand(command="groups", description="источники"),
+            BotCommand(command="add", description="добавить источник"),
+            BotCommand(command="filters", description="стоп-слова"),
+            BotCommand(command="settings", description="медиа, модель, критерии"),
+            BotCommand(command="stats", description="статистика"),
+            BotCommand(command="models", description="модели Gemini"),
+        ])
         await bot.send_message(cfg.admin_id, startup_report(info))
 
         pending = await db.drafts(status="pending", limit=3)   # показать, что ждало, пока бот лежал

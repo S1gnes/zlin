@@ -265,3 +265,41 @@ def _blocked_status(url: str) -> Status | None:
 
 def _safe(s: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in s)[:60]
+
+
+class LazyFacebookScraper:
+    """Тот же интерфейс, но Chromium поднимается при первом обращении.
+
+    Боту браузер нужен редко: только для /add группы и «проверить сейчас». Пока Facebook
+    закрыт стеной логина, поднимать его при старте — впустую держать 300 МБ памяти.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        self._kwargs = kwargs
+        self._inner: FacebookScraper | None = None
+        self._lock = asyncio.Lock()
+
+    async def _scraper(self) -> FacebookScraper:
+        async with self._lock:
+            if self._inner is None:
+                log.info("поднимаю Chromium: понадобился Facebook")
+                self._inner = await FacebookScraper(**self._kwargs).__aenter__()  # type: ignore[arg-type]
+        return self._inner
+
+    async def fetch_group(self, slug: str, *, group_id: str | None = None,
+                          save_html: Path | None = None) -> ScrapeResult:
+        return await (await self._scraper()).fetch_group(slug, group_id=group_id, save_html=save_html)
+
+    async def fetch_activity(self, slug: str, *, save_html: Path | None = None) -> extract.Activity | None:
+        return await (await self._scraper()).fetch_activity(slug, save_html=save_html)
+
+    async def close(self) -> None:
+        if self._inner is not None:
+            await self._inner.__aexit__()
+            self._inner = None
+
+    async def __aenter__(self) -> "LazyFacebookScraper":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.close()

@@ -16,10 +16,12 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from ..collector import Collector
 from ..db import Database
 from ..media import MediaStore
 from ..pipeline import Summarizer
 from .access import AdminOnly
+from . import admin
 from .handlers import make_router
 from .publisher import Publisher
 
@@ -89,14 +91,16 @@ def startup_report(info: ChannelInfo) -> str:
 
 def build_dispatcher(db: Database, publisher: Publisher, gemini: Summarizer | None, *,
                      admin_id: int, discussion_chat_id: int | None = None,
-                     store: MediaStore | None = None) -> Dispatcher:
+                     store: MediaStore | None = None, collector: Collector | None = None) -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     dp.update.outer_middleware(AdminOnly(admin_id, discussion_chat_id))
     dp["db"] = db
     dp["publisher"] = publisher
     dp["gemini"] = gemini
     dp["store"] = store
+    dp["collector"] = collector
     dp.include_router(make_router())
+    dp.include_router(admin.make_router())
     return dp
 
 

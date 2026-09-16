@@ -38,7 +38,7 @@ def translation_comment(draft: Draft) -> str:
 
 
 def draft_card(draft: Draft, post: StoredPost, group: Group | None, *, media_ready: int = 0) -> str:
-    when = _local(post.created_at or post.seen_at)
+    when = fmt_when(post.created_at or post.seen_at)
     source = escape(group.title if group else "источник")
     lines = [f"📨 <b>Черновик #{draft.id}</b> · {source} · {when}",
              "", escape(draft.summary)]
@@ -60,7 +60,7 @@ def published_note(draft: Draft, link: str | None, *, commented: bool) -> str:
     return f"✅ Черновик #{draft.id} опубликован ({tail})." + (f"\n{link}" if link else "")
 
 
-def _local(ts: float | None) -> str:
+def fmt_when(ts: float | None) -> str:
     from datetime import datetime
     return datetime.fromtimestamp(ts, TZ).strftime("%d.%m %H:%M") if ts else "—"
 
