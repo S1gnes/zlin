@@ -67,7 +67,13 @@ class MockSession(BaseSession):
             if isinstance(prepared, list):
                 return prepared.pop(0) if len(prepared) > 1 else prepared[0]
             return prepared
-        if name in ("SendMessage", "SendPhoto", "SendMediaGroup"):
+        if name == "SendMediaGroup":          # Bot API возвращает список сообщений, по одному на файл
+            messages = []
+            for _ in getattr(method, "media", [1]):
+                self._next_message_id += 1
+                messages.append(make_message(self._next_message_id, chat_id=method.chat_id))
+            return messages
+        if name in ("SendMessage", "SendPhoto", "SendVideo", "SendDocument"):
             self._next_message_id += 1
             return make_message(self._next_message_id, chat_id=getattr(method, "chat_id", ADMIN_ID),
                                 text=getattr(method, "text", ""))

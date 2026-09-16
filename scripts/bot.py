@@ -22,6 +22,7 @@ from zlinbot.bot.handlers import send_draft  # noqa: E402
 from zlinbot.bot.publisher import Publisher  # noqa: E402
 from zlinbot.db import Database  # noqa: E402
 from zlinbot.gemini import Gemini  # noqa: E402
+from zlinbot.media import MediaStore  # noqa: E402
 from zlinbot.pipeline import current_model  # noqa: E402
 
 log = logging.getLogger("zlinbot.run")
@@ -45,16 +46,17 @@ async def main_async() -> None:
         else:
             log.warning("нет GEMINI_API_KEY — кнопка «Переписать» работать не будет")
 
+        store = await stack.enter_async_context(MediaStore(cfg.media_dir))
         info = await check_channel(bot, cfg.channel_id)
         publisher = Publisher(bot, db, cfg.channel_id, channel_username=info.username,
-                              discussion_chat_id=info.discussion_chat_id)
+                              discussion_chat_id=info.discussion_chat_id, store=store)
         dp = build_dispatcher(db, publisher, gemini, admin_id=cfg.admin_id,
-                              discussion_chat_id=info.discussion_chat_id)
+                              discussion_chat_id=info.discussion_chat_id, store=store)
         await bot.send_message(cfg.admin_id, startup_report(info))
 
         pending = await db.drafts(status="pending", limit=3)   # показать, что ждало, пока бот лежал
         for draft in pending:
-            await send_draft(bot, db, cfg.admin_id, draft.id)
+            await send_draft(bot, db, cfg.admin_id, draft.id, store)
 
         log.info("бот запущен, владелец %s, канал %s", cfg.admin_id, info.title or cfg.channel_id)
         await dp.start_polling(bot, handle_signals=False)

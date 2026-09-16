@@ -37,7 +37,7 @@ def translation_comment(draft: Draft) -> str:
     return _fit(f"🇷🇺 {escape(draft.summary_ru or '')}", MAX_TEXT)
 
 
-def draft_card(draft: Draft, post: StoredPost, group: Group | None) -> str:
+def draft_card(draft: Draft, post: StoredPost, group: Group | None, *, media_ready: int = 0) -> str:
     when = _local(post.created_at or post.seen_at)
     source = escape(group.title if group else "источник")
     lines = [f"📨 <b>Черновик #{draft.id}</b> · {source} · {when}",
@@ -48,7 +48,9 @@ def draft_card(draft: Draft, post: StoredPost, group: Group | None) -> str:
         lines += ["", "<b>Сверь с оригиналом:</b>"] + [f"• {escape(f)}" for f in draft.facts]
     if post.media:
         kinds = ", ".join(sorted({m["kind"] for m in post.media}))
-        lines += ["", f"<i>Медиа: {len(post.media)} ({kinds}) — переносится на этапе 5</i>"]
+        note = (f"пойдёт в пост: {media_ready} из {len(post.media)}" if media_ready
+                else "не переносится — уйдёт только текст со ссылкой")
+        lines += ["", f"<i>Медиа ({kinds}): {note}</i>"]
     lines += ["", f"<i>Модель: {escape(draft.model or '?')}</i>"]
     return _fit("\n".join(lines), MAX_TEXT)
 

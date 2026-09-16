@@ -35,6 +35,7 @@ from zlinbot.db import Database, day_bounds  # noqa: E402
 from zlinbot.fb import extract  # noqa: E402
 from zlinbot.fb.scraper import FacebookScraper  # noqa: E402
 from zlinbot.gemini import Gemini, GeminiError  # noqa: E402
+from zlinbot.media import MediaStore  # noqa: E402
 from zlinbot.pipeline import Processor, current_model  # noqa: E402
 from zlinbot.rss import RssFetcher  # noqa: E402
 
@@ -104,8 +105,8 @@ async def cmd_process(db: Database, cfg, limit: int) -> None:
         print("Нет ключа. Положи GEMINI_API_KEY=... в файл .env рядом с проектом (образец — .env.example).")
         return
     model = await current_model(db, cfg.gemini_model)
-    async with Gemini(cfg.gemini_key, model=model) as gemini:
-        report = await Processor(db, gemini, limit=limit).run()
+    async with Gemini(cfg.gemini_key, model=model) as gemini, MediaStore(cfg.media_dir) as store:
+        report = await Processor(db, gemini, store=store, limit=limit).run()
     for d in report.decisions:
         head = f"[{d.status}] {d.post.post_id}"
         if d.note:
@@ -117,6 +118,10 @@ async def cmd_process(db: Database, cfg, limit: int) -> None:
             print(f"    cs: {d.verdict.post}")
             print(f"    ru: {d.verdict.post_ru}")
             print(f"    факты: {'; '.join(d.verdict.facts) or '—'}")
+            if d.media:
+                sizes = ", ".join(f"{m.kind} {m.size // 1024} КБ" for m in d.media.files)
+                print(f"    медиа: {sizes or 'ничего не скачалось'}"
+                      + (f"; пропущено: {'; '.join(d.media.skipped)}" if d.media.skipped else ""))
     for a in report.alerts:
         print(a)
     if not report.decisions and not report.alerts:

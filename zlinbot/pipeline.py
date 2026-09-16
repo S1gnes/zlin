@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from . import filters
 from .db import Database, StoredPost
+from .media import DownloadReport, MediaStore
 from .gemini import (DEFAULT_CRITERIA, DEFAULT_MODEL, GeminiBadRequest, GeminiBlocked, GeminiError,
                      GeminiQuotaExhausted, Verdict)
 from .textnorm import significant
@@ -35,6 +36,7 @@ class Decision:
     note: str | None = None
     draft_id: int | None = None
     verdict: Verdict | None = None
+    media: DownloadReport | None = None
 
 
 @dataclass
@@ -57,10 +59,11 @@ class Summarizer:
 
 
 class Processor:
-    def __init__(self, db: Database, gemini: Summarizer | None, *,
+    def __init__(self, db: Database, gemini: Summarizer | None, *, store: MediaStore | None = None,
                  clock: Callable[[], float] = time.time, limit: int = MAX_PER_ROUND) -> None:
         self.db = db
         self.gemini = gemini
+        self.store = store
         self.clock = clock
         self.limit = limit
         self._paused_until: float | None = None  # пауза до сброса суточной квоты
@@ -121,6 +124,10 @@ class Processor:
                                            model=verdict.model, now=self.clock())
         decision = await self._decide(post, "pending", None, verdict=verdict)
         decision.draft_id = draft_id
+        # медиа качаем сейчас, а не при публикации: ссылки Facebook протухают за дни,
+        # а черновик может столько ждать решения
+        if self.store and post.media:
+            decision.media = await self.store.fetch(draft_id, post.media)
         await self.db.log("drafted", post_id=post.post_id, now=self.clock())
         return decision
 
@@ -139,6 +146,7 @@ class Processor:
 
 
 async def rewrite_draft(db: Database, gemini: Summarizer, draft_id: int, *, instruction: str = "",
+                        store: MediaStore | None = None,
                         clock: Callable[[], float] = time.time) -> int | None:
     """Переписать черновик: новая версия — новая строка, старая помечается superseded.
     None — модель на этот раз решила, что запись каналу не подходит."""
@@ -157,6 +165,9 @@ async def rewrite_draft(db: Database, gemini: Summarizer, draft_id: int, *, inst
                                 summary_ru=verdict.post_ru or None, facts=verdict.facts,
                                 model=verdict.model, now=clock())
     await db.set_draft_status(draft_id, "superseded", expect=["pending"], now=clock())
+    if store and post.media:          # файлы лежат под старым id черновика — переносим на новый
+        await store.fetch(new_id, post.media)
+        store.clear(draft_id)
     return new_id
 
 

@@ -12,9 +12,10 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, InputMediaVideo, Message
 
 from ..db import Database
+from ..media import MediaStore
 from ..gemini import GeminiError
 from ..pipeline import Summarizer, rewrite_draft
 from . import texts
@@ -35,14 +36,22 @@ class Rewriting(StatesGroup):
     waiting_instruction = State()
 
 
-async def send_draft(bot: Bot, db: Database, chat_id: int, draft_id: int) -> int | None:
-    """Показать черновик с кнопками. Возвращает id сообщения — по нему потом убираем кнопки."""
+async def send_draft(bot: Bot, db: Database, chat_id: int, draft_id: int,
+                     store: MediaStore | None = None) -> int | None:
+    """Показать черновик с кнопками. Медиа уходит отдельным альбомом перед карточкой:
+    к media group инлайн-кнопки не прицепишь."""
     draft = await db.get_draft(draft_id)
     post = await db.get_post(draft.post_id) if draft else None
     if draft is None or post is None:
         return None
     group = await db.get_group(post.group_id) if post.group_id else None
-    message = await bot.send_message(chat_id, texts.draft_card(draft, post, group),
+    local = store.local(draft_id) if store else []
+    if local:
+        try:
+            await _send_preview(bot, chat_id, local)
+        except Exception:  # noqa: BLE001 — без превью карточку всё равно показываем
+            log.warning("не смог показать медиа черновика #%s", draft_id, exc_info=True)
+    message = await bot.send_message(chat_id, texts.draft_card(draft, post, group, media_ready=len(local)),
                                      reply_markup=draft_keyboard(draft.id, post.permalink),
                                      link_preview_options=NO_PREVIEW)
     await db.set_draft_message(draft.id, message.message_id)
@@ -56,7 +65,8 @@ async def cmd_start(message: Message, db: Database) -> None:
                          f"Записей в базе: {sum(counts.values())}.")
 
 
-async def cmd_pending(message: Message, bot: Bot, db: Database) -> None:
+async def cmd_pending(message: Message, bot: Bot, db: Database,
+                      store: MediaStore | None = None) -> None:
     drafts = await db.drafts(status="pending", limit=99)
     if not drafts:
         await message.answer("Очередь пуста.")
@@ -64,7 +74,7 @@ async def cmd_pending(message: Message, bot: Bot, db: Database) -> None:
     await message.answer(f"Черновиков в очереди: {len(drafts)}."
                          + (f" Показываю первые {PENDING_LIMIT}." if len(drafts) > PENDING_LIMIT else ""))
     for draft in drafts[:PENDING_LIMIT]:
-        await send_draft(bot, db, message.chat.id, draft.id)
+        await send_draft(bot, db, message.chat.id, draft.id, store)
 
 
 async def on_publish(query: CallbackQuery, callback_data: DraftAction, publisher: Publisher) -> None:
@@ -95,18 +105,19 @@ async def on_rewrite(query: CallbackQuery, callback_data: DraftAction, state: FS
 
 
 async def on_again(query: CallbackQuery, callback_data: DraftAction, state: FSMContext,
-                   bot: Bot, db: Database, gemini: Summarizer | None) -> None:
+                   bot: Bot, db: Database, gemini: Summarizer | None,
+                   store: MediaStore | None = None) -> None:
     await state.clear()
     await query.answer("Переписываю")
-    await _rewrite(bot, db, gemini, query.message, callback_data.draft_id, "")
+    await _rewrite(bot, db, gemini, query.message, callback_data.draft_id, "", store)
 
 
 async def on_instruction(message: Message, state: FSMContext, bot: Bot, db: Database,
-                         gemini: Summarizer | None) -> None:
+                         gemini: Summarizer | None, store: MediaStore | None = None) -> None:
     draft_id = (await state.get_data()).get("draft_id")
     await state.clear()
     if draft_id:
-        await _rewrite(bot, db, gemini, message, int(draft_id), message.text or "")
+        await _rewrite(bot, db, gemini, message, int(draft_id), message.text or "", store)
 
 
 async def on_channel_forward(message: Message, publisher: Publisher) -> None:
@@ -115,13 +126,13 @@ async def on_channel_forward(message: Message, publisher: Publisher) -> None:
 
 
 async def _rewrite(bot: Bot, db: Database, gemini: Summarizer | None, message: Message,
-                   draft_id: int, instruction: str) -> None:
+                   draft_id: int, instruction: str, store: MediaStore | None = None) -> None:
     if gemini is None:
         await message.answer("Нет ключа Gemini — переписать не могу.")
         return
     await bot.send_chat_action(message.chat.id, "typing")
     try:
-        new_id = await rewrite_draft(db, gemini, draft_id, instruction=instruction)
+        new_id = await rewrite_draft(db, gemini, draft_id, instruction=instruction, store=store)
     except GeminiError as e:
         await message.answer(f"Gemini не ответил: {e}")
         return
@@ -129,7 +140,7 @@ async def _rewrite(bot: Bot, db: Database, gemini: Summarizer | None, message: M
         await message.answer(f"Не переписал: черновик #{draft_id} уже не в очереди, "
                              f"либо модель решила, что запись каналу не подходит.")
         return
-    await send_draft(bot, db, message.chat.id, new_id)
+    await send_draft(bot, db, message.chat.id, new_id, store)
 
 
 def make_router() -> Router:
@@ -147,6 +158,17 @@ def make_router() -> Router:
     router.callback_query.register(on_again, DraftAction.filter(F.action == "again"),
                                    Rewriting.waiting_instruction)
     return router
+
+
+async def _send_preview(bot: Bot, chat_id: int, local: list) -> None:
+    if len(local) == 1:
+        item = local[0]
+        send = bot.send_video if item.kind == "video" else bot.send_photo
+        await send(chat_id, FSInputFile(item.path))
+        return
+    group = [(InputMediaVideo if i.kind == "video" else InputMediaPhoto)(media=FSInputFile(i.path))
+             for i in local]
+    await bot.send_media_group(chat_id, group)
 
 
 async def _drop_buttons(query: CallbackQuery) -> None:

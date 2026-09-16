@@ -248,3 +248,82 @@ async def test_startup_warns_when_bot_cannot_post():
 async def test_startup_warns_when_bot_is_not_admin_in_discussion_group():
     _, report = await startup(linked=DISCUSSION_ID, in_group="member")
     assert "в группе обсуждений не администратор" in report
+
+
+# -- медиа ---------------------------------------------------------------------
+
+def with_media(db, bot, gemini, tmp_path, *, files: int = 1, mode: str = "copy", discussion=None):
+    """Публикатор с кэшем медиа: кладём файлы так, как их кладёт MediaStore."""
+    from zlinbot.media import MediaStore
+    store = MediaStore(tmp_path / "media")
+    folder = store.dir_for(1)
+    folder.mkdir(parents=True, exist_ok=True)
+    for i in range(files):
+        (folder / f"{i:02d}-photo-p{i}.jpg").write_bytes(b"\xff\xd8\xff" + b"x" * 100)
+    publisher = Publisher(bot, db, CHANNEL_ID, channel_username="zlin_kanal",
+                          discussion_chat_id=discussion, store=store, clock=lambda: T0)
+    return build_dispatcher(db, publisher, gemini, admin_id=ADMIN_ID, discussion_chat_id=discussion,
+                            store=store), store
+
+
+async def test_single_photo_goes_with_caption(env, tmp_path):
+    db, bot, session, gemini, draft_id = env
+    dp, store = with_media(db, bot, gemini, tmp_path, files=1)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    sent = session.last("SendPhoto")
+    assert sent.chat_id == CHANNEL_ID
+    assert "📍 ZLIN.CZ" in sent.caption and "Uzavírka potrvá" in sent.caption
+    assert store.files(draft_id) == []                      # файлы убраны после публикации
+
+
+async def test_several_photos_go_as_album_with_caption_on_first(env, tmp_path):
+    db, bot, session, gemini, draft_id = env
+    dp, _ = with_media(db, bot, gemini, tmp_path, files=3)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    album = session.last("SendMediaGroup")
+    assert len(album.media) == 3
+    assert album.media[0].caption and album.media[1].caption is None
+    assert (await db.get_draft(draft_id)).channel_msg_id is not None
+
+
+async def test_long_text_goes_after_the_album(env, tmp_path):
+    db, bot, session, gemini, draft_id = env
+    from zlinbot.bot import texts
+    await db.set_draft_status(draft_id, "pending", now=T0)       # вернуть в очередь после фикстуры
+    long_summary = "Dlouhý text. " * 120                          # заведомо больше 1024 символов подписи
+    await db.add_draft(post_id="rss:a", summary=long_summary, summary_ru="Длинно.",
+                       facts=[], model="m", now=T0)
+    new_id = (await db.drafts(status="pending"))[-1].id
+    dp, store = with_media(db, bot, gemini, tmp_path, files=2)
+    folder = store.dir_for(new_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "00-photo-a.jpg").write_bytes(b"\xff\xd8\xffxx")
+
+    await dp.feed_update(bot, callback_update(f"d:publish:{new_id}"))
+    assert len(long_summary) > texts.MAX_CAPTION
+    photo = session.last("SendPhoto")
+    assert photo.caption is None                                  # в подпись не влезло
+    tail = [c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID][-1]
+    assert "Dlouhý text." in tail.text
+    # текст отвечает именно на альбом, а не висит отдельно; тот же id сохранён у черновика
+    assert tail.reply_parameters.message_id == (await db.get_draft(new_id)).channel_msg_id
+
+
+async def test_media_rejected_by_telegram_falls_back_to_text(env, tmp_path):
+    db, bot, session, gemini, draft_id = env
+    session.set_error("SendPhoto", TelegramBadRequest(method=SendMessage(chat_id=1, text="x"),
+                                                      message="IMAGE_PROCESS_FAILED"))
+    dp, _ = with_media(db, bot, gemini, tmp_path, files=1)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
+    assert "Uzavírka potrvá" in post.text                          # новость вышла, пусть и без фото
+    assert (await db.get_draft(draft_id)).status == "published"
+
+
+async def test_link_only_mode_sends_no_media(env, tmp_path):
+    db, bot, session, gemini, draft_id = env
+    await db.set_setting("media_mode", "link")
+    dp, _ = with_media(db, bot, gemini, tmp_path, files=2)
+    await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
+    assert session.count("SendMediaGroup") == 0 and session.count("SendPhoto") == 0
+    assert next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
