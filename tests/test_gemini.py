@@ -10,6 +10,7 @@ from zlinbot.gemini import (DEFAULT_CRITERIA, Gemini, GeminiBadRequest, GeminiBl
 
 ANSWER = {"skip": False, "post": "Od 20. září bude uzavřena třída Tomáše Bati.",
           "post_ru": "С 20 сентября улица Томаша Бати будет закрыта.",
+          "post_ua": "З 20 вересня вулиця Томаша Баті буде закрита.",
           "facts": ["uzavírka od 20. září", "třída Tomáše Bati"]}
 
 
@@ -27,6 +28,7 @@ def test_clean_json():
     v = parse_response(json.dumps(ANSWER, ensure_ascii=False))
     assert v.skip is False
     assert v.post == ANSWER["post"] and v.post_ru == ANSWER["post_ru"]
+    assert v.post_ua == ANSWER["post_ua"]
     assert v.facts == tuple(ANSWER["facts"])
 
 
@@ -57,7 +59,8 @@ def test_sloppy_field_types_are_survived():
 def test_prompt_carries_rules_and_content():
     prompt = build_prompt("Uzavírka od 20. září", source="ZLIN.CZ", criteria="Только новости города")
     assert "Только новости города" in prompt and "ZLIN.CZ" in prompt and "Uzavírka od 20. září" in prompt
-    for rule in ("Не выдумывай", "дословно", "по-чешски", "post_ru", "facts", "частных лиц"):
+    for rule in ("Не выдумывай", "дословно", "по-чешски", "post_ru", "post_ua", "по-украински",
+                 "facts", "частных лиц"):
         assert rule in prompt
     assert "Отсеивать" in build_prompt("x", source="s")  # критерии по умолчанию на месте
     assert DEFAULT_CRITERIA.splitlines()[0][:20] in build_prompt("x", source="s")
@@ -96,7 +99,7 @@ async def test_successful_call_sends_key_and_json_contract():
     assert seen["key"] == "test-key"
     cfg = seen["body"]["generationConfig"]
     assert cfg["responseMimeType"] == "application/json"
-    assert cfg["responseSchema"]["required"] == ["skip", "post", "post_ru", "facts"]
+    assert cfg["responseSchema"]["required"] == ["skip", "post", "post_ru", "post_ua", "facts"]
 
 
 async def test_429_per_minute_is_retried_then_succeeds():

@@ -17,6 +17,9 @@ MAX_CAPTION = 1024   # пригодится на этапе 5: у media group п
 
 SOURCE_MARK = "📍"
 LINK_MARK = "🔗"
+# Переводы помечаем кодом языка, а не флагом: флаг обозначает страну, а не язык,
+# и в этом канале такой подтекст ни к чему.
+LANG_MARKS = (("ru", "RU"), ("ua", "UA"))
 
 
 def channel_post(draft: Draft, post: StoredPost, group: Group | None, *, with_spoiler: bool) -> str:
@@ -28,13 +31,20 @@ def channel_post(draft: Draft, post: StoredPost, group: Group | None, *, with_sp
     parts = [escape(draft.summary).strip()]
     source = escape(group.title if group else (post.author or "источник"))
     parts.append(f"{SOURCE_MARK} {source}\n{LINK_MARK} {escape(post.permalink)}")
-    if with_spoiler and draft.summary_ru:
-        parts.append(f"<tg-spoiler>🇷🇺 {escape(draft.summary_ru)}</tg-spoiler>")
+    if with_spoiler and (body := translations(draft)):
+        parts.append(f"<tg-spoiler>{body}</tg-spoiler>")
     return _fit("\n\n".join(parts), MAX_TEXT)
 
 
+def translations(draft: Draft) -> str:
+    """Переводы одним блоком: «RU: …» и «UA: …». Пусто, если переводов нет."""
+    return "\n\n".join(f"{mark}: {escape(text)}"
+                       for code, mark in LANG_MARKS
+                       if (text := getattr(draft, f"summary_{code}", None)))
+
+
 def translation_comment(draft: Draft) -> str:
-    return _fit(f"🇷🇺 {escape(draft.summary_ru or '')}", MAX_TEXT)
+    return _fit(translations(draft), MAX_TEXT)
 
 
 def draft_card(draft: Draft, post: StoredPost, group: Group | None, *, media_ready: int = 0) -> str:
@@ -42,8 +52,8 @@ def draft_card(draft: Draft, post: StoredPost, group: Group | None, *, media_rea
     source = escape(group.title if group else "источник")
     lines = [f"📨 <b>Черновик #{draft.id}</b> · {source} · {when}",
              "", escape(draft.summary)]
-    if draft.summary_ru:
-        lines += ["", f"🇷🇺 {escape(draft.summary_ru)}"]
+    if body := translations(draft):
+        lines += ["", body]
     if draft.facts:
         lines += ["", "<b>Сверь с оригиналом:</b>"] + [f"• {escape(f)}" for f in draft.facts]
     if post.media:

@@ -11,7 +11,8 @@ from zlinbot.pipeline import MAX_PER_ROUND, Processor
 T0 = 1_789_000_000
 NEWS = "Uzavírka na třídě Tomáše Bati potrvá od 20. září do 30. října, objízdná trasa vede přes Kvítkovou."
 KEEP = Verdict(False, "Uzavírka potrvá do 30. října.", "Перекрытие продлится до 30 октября.",
-               ("od 20. září", "třída Tomáše Bati"), model="gemini-2.5-flash")
+               "Перекриття триватиме до 30 жовтня.", ("od 20. září", "třída Tomáše Bati"),
+               model="gemini-2.5-flash")
 
 
 class FakeGemini:
@@ -86,6 +87,7 @@ async def test_keep_creates_draft(db):
     assert (await db.get_post("p1")).status == "pending"
     [draft] = await db.drafts()
     assert draft.summary == KEEP.post and draft.summary_ru == KEEP.post_ru
+    assert draft.summary_ua == KEEP.post_ua
     assert draft.facts == list(KEEP.facts) and draft.model == "gemini-2.5-flash"
     assert (await db.event_counts(0)).get("drafted") == 1
 

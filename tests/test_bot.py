@@ -11,7 +11,8 @@ from zlinbot.db import Database
 from zlinbot.gemini import Verdict
 
 T0 = 1_789_000_000
-REWRITTEN = Verdict(False, "Kratší verze.", "Короче.", ("fakt",), model="gemini-2.5-flash")
+REWRITTEN = Verdict(False, "Kratší verze.", "Короче.", "Коротше.", ("fakt",),
+                    model="gemini-2.5-flash")
 
 
 class FakeGemini:
@@ -39,6 +40,7 @@ async def env(tmp_path):
                              text_hash=None, now=T0)
         draft_id = await db.add_draft(post_id="rss:a", summary="Uzavírka potrvá do 30. října.",
                                       summary_ru="Перекрытие продлится до 30 октября.",
+                                      summary_ua="Перекриття триватиме до 30 жовтня.",
                                       facts=["od 20. září"], model="gemini-2.5-flash", now=T0)
         bot, session = make_bot()
         gemini = FakeGemini()
@@ -129,7 +131,9 @@ async def test_without_discussion_group_translation_goes_under_spoiler(env):
     dp = dispatcher(db, bot, gemini, discussion=None)
     await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
     post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
-    assert "<tg-spoiler>🇷🇺 Перекрытие продлится до 30 октября.</tg-spoiler>" in post.text
+    assert ("<tg-spoiler>RU: Перекрытие продлится до 30 октября.\n\n"
+            "UA: Перекриття триватиме до 30 жовтня.</tg-spoiler>") in post.text
+    assert "🇷🇺" not in post.text          # флагов стран в посте нет
 
 
 async def test_with_discussion_group_translation_goes_as_first_comment(env):
@@ -142,7 +146,8 @@ async def test_with_discussion_group_translation_goes_as_first_comment(env):
 
     await dp.feed_update(bot, forward_update(channel_msg_id, update_id=2))
     comment = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == DISCUSSION_ID)
-    assert comment.text == "🇷🇺 Перекрытие продлится до 30 октября."
+    assert comment.text == ("RU: Перекрытие продлится до 30 октября.\n\n"
+                            "UA: Перекриття триватиме до 30 жовтня.")
     assert comment.reply_parameters.message_id == 7001
     assert (await db.get_draft(draft_id)).comment_msg_id is not None
 

@@ -120,7 +120,8 @@ class Processor:
             return await self._decide(post, "skipped", note, verdict=verdict)
 
         draft_id = await self.db.add_draft(post_id=post.post_id, summary=verdict.post,
-                                           summary_ru=verdict.post_ru or None, facts=verdict.facts,
+                                           summary_ru=verdict.post_ru or None,
+                                           summary_ua=verdict.post_ua or None, facts=verdict.facts,
                                            model=verdict.model, now=self.clock())
         decision = await self._decide(post, "pending", None, verdict=verdict)
         decision.draft_id = draft_id
@@ -162,7 +163,8 @@ async def rewrite_draft(db: Database, gemini: Summarizer, draft_id: int, *, inst
     if verdict.skip or not verdict.post:
         return None
     new_id = await db.add_draft(post_id=post.post_id, summary=verdict.post,
-                                summary_ru=verdict.post_ru or None, facts=verdict.facts,
+                                summary_ru=verdict.post_ru or None,
+                                summary_ua=verdict.post_ua or None, facts=verdict.facts,
                                 model=verdict.model, now=clock())
     await db.set_draft_status(draft_id, "superseded", expect=["pending"], now=clock())
     if store and post.media:          # файлы лежат под старым id черновика — переносим на новый

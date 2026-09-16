@@ -104,7 +104,7 @@ class Publisher:
         if origin_id is None:
             return None
         draft = await self.db.draft_by_channel_msg(origin_id)
-        if draft is None or draft.comment_msg_id or not draft.summary_ru:
+        if draft is None or draft.comment_msg_id or not texts.translations(draft):
             return None
         try:
             comment = await self.bot.send_message(

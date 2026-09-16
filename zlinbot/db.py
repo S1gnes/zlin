@@ -76,7 +76,7 @@ CREATE TABLE drafts (
     id             INTEGER PRIMARY KEY,        -- именно он идёт в callback_data (лимит 64 байта)
     post_id        TEXT    NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
     summary        TEXT    NOT NULL,           -- пересказ по-чешски
-    summary_ru     TEXT,                       -- перевод для комментария
+    summary_ru     TEXT,                       -- переводы для комментария
     facts_json     TEXT    NOT NULL DEFAULT '[]',
     model          TEXT,
     status         TEXT    NOT NULL DEFAULT 'pending'
@@ -131,7 +131,12 @@ ALTER TABLE drafts ADD COLUMN comment_msg_id INTEGER;
 CREATE INDEX drafts_channel_msg ON drafts(channel_msg_id) WHERE channel_msg_id IS NOT NULL;
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3)
+# v4: украинский перевод рядом с русским
+_V4 = """
+ALTER TABLE drafts ADD COLUMN summary_ua TEXT;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4)
 
 _GROUP_COLUMNS = frozenset({"url", "slug", "fb_id", "name", "status", "fail_streak", "last_status",
                             "last_checked_at", "last_ok_at", "etag", "last_modified"})
@@ -165,6 +170,7 @@ class Draft:
     post_id: str
     summary: str
     summary_ru: str | None
+    summary_ua: str | None
     facts: list[str]
     model: str | None
     status: str
@@ -373,11 +379,13 @@ class Database:
     # -- черновики -----------------------------------------------------------
 
     async def add_draft(self, *, post_id: str, summary: str, summary_ru: str | None,
-                        facts: Iterable[str], model: str | None, now: float) -> int:
+                        facts: Iterable[str], model: str | None, now: float,
+                        summary_ua: str | None = None) -> int:
         cur = await self._write(
-            "INSERT INTO drafts (post_id, summary, summary_ru, facts_json, model, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (post_id, summary, summary_ru, json.dumps(list(facts), ensure_ascii=False), model, int(now)))
+            "INSERT INTO drafts (post_id, summary, summary_ru, summary_ua, facts_json, model, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (post_id, summary, summary_ru, summary_ua,
+             json.dumps(list(facts), ensure_ascii=False), model, int(now)))
         return int(cur.lastrowid)
 
     async def get_draft(self, draft_id: int) -> Draft | None:
