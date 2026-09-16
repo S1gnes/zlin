@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+tests/
+debug/
+watch_out/
+media/
+data/
+.git/
+.env
+*.db
+*.db-wal
+*.db-shm
+run.bat
