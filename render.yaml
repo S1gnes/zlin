@@ -11,7 +11,8 @@ services:
     region: frankfurt          # ближе к Чехии: и к источникам, и к Telegram
     dockerfilePath: ./Dockerfile
     autoDeploy: false          # деплой по кнопке: бот пишет в реальный канал
-    maxShutdownDelaySeconds: 30  # успеть закрыть опрос Telegram до SIGKILL
+    # maxShutdownDelaySeconds здесь не указываем: Render его не принимает у сервисов
+    # с диском. Стандартных 30 секунд хватает — бот ловит SIGTERM и закрывает опрос сам.
     disk:
       name: zlinbot-data       # без диска SQLite и кэш медиа стираются при каждом деплое
       mountPath: /data
