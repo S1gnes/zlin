@@ -136,7 +136,13 @@ _V4 = """
 ALTER TABLE drafts ADD COLUMN summary_ua TEXT;
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4)
+# v5: счётчик неудачных попыток разбора — временная ошибка модели не должна хоронить запись,
+# но и вечно крутить одну и ту же запись по кругу тоже нельзя
+_V5 = """
+ALTER TABLE posts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5)
 
 _GROUP_COLUMNS = frozenset({"url", "slug", "fb_id", "name", "status", "fail_streak", "last_status",
                             "last_checked_at", "last_ok_at", "etag", "last_modified"})
@@ -197,6 +203,7 @@ class StoredPost:
     status: str
     status_at: int
     note: str | None
+    attempts: int = 0    # неудачных попыток разбора подряд (v5)
 
 
 def day_bounds(day: date) -> tuple[int, int]:
@@ -368,9 +375,17 @@ class Database:
 
     async def requeue_posts(self, status: str = "failed", *, now: float | None = None) -> int:
         """Вернуть записи в очередь: после починки настроек их надо разобрать заново."""
-        cur = await self._write("UPDATE posts SET status = 'new', note = NULL, status_at = ? WHERE status = ?",
-                                (int(now or time.time()), status))
+        cur = await self._write(
+            "UPDATE posts SET status = 'new', note = NULL, attempts = 0, status_at = ? WHERE status = ?",
+            (int(now or time.time()), status))
         return cur.rowcount
+
+    async def bump_attempts(self, post_id: str, *, now: float | None = None) -> int:
+        """+1 к счётчику попыток разбора, возвращает новое значение."""
+        await self._write("UPDATE posts SET attempts = attempts + 1, status_at = ? WHERE post_id = ?",
+                          (int(now or time.time()), post_id))
+        value = await self._scalar("SELECT attempts FROM posts WHERE post_id = ?", (post_id,))
+        return int(value or 0)
 
     async def post_status_counts(self) -> dict[str, int]:
         rows = await self._rows("SELECT status, COUNT(*) FROM posts GROUP BY status")

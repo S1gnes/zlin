@@ -5,8 +5,9 @@ import time
 import httpx
 import pytest
 
-from zlinbot.gemini import (DEFAULT_CRITERIA, Gemini, GeminiBadRequest, GeminiBlocked, GeminiError,
-                            GeminiQuotaExhausted, GeminiRetryable, build_prompt, parse_response)
+from zlinbot.gemini import (DEFAULT_CRITERIA, DEFAULT_MODEL, FALLBACK_MODELS, Gemini, GeminiBadRequest,
+                            GeminiBlocked, GeminiError, GeminiQuotaExhausted, GeminiRetryable,
+                            build_prompt, next_model, parse_response)
 
 ANSWER = {"skip": False, "post": "Od 20. září bude uzavřena třída Tomáše Bati.",
           "post_ru": "С 20 сентября улица Томаша Бати будет закрыта.",
@@ -95,7 +96,7 @@ async def test_successful_call_sends_key_and_json_contract():
 
     async with gemini(handler) as g:
         v = await g.summarize("Uzavírka", source="ZLIN.CZ")
-    assert v.post == ANSWER["post"] and v.model == "gemini-2.5-flash"
+    assert v.post == ANSWER["post"] and v.model == DEFAULT_MODEL
     assert seen["key"] == "test-key"
     cfg = seen["body"]["generationConfig"]
     assert cfg["responseMimeType"] == "application/json"
@@ -129,6 +130,41 @@ async def test_429_daily_quota_is_not_retried():
             await g.summarize("x")
     assert len(calls) == 1                       # ретраи бессмысленны — квота суточная
     assert e.value.reset_at > time.time()
+
+
+async def test_429_daily_quota_is_recognised_by_details_not_by_message():
+    """Боевой ответ Gemini: в message название метрики не попадает (он обрезан), зато в
+    details лежит quotaId с «PerDay». Раньше такой 429 считался временным, три ретрая
+    впустую, и запись уходила в «сломано» — так за два дня потерялось 34 записи."""
+    body = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                      "message": "You exceeded your current quota, please check your plan and billing "
+                                 "details. For more information on this error, head to: "
+                                 "https://ai.google.dev/gemini-api/docs/rate-limits.",
+                      "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                                   "violations": [{
+                                       "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                                       "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                                       "quotaDimensions": {"model": "gemini-3.6-flash"},
+                                       "quotaValue": "20"}]},
+                                  {"@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                   "retryDelay": "19s"}]}}
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json=body)
+
+    async with gemini(handler) as g:
+        with pytest.raises(GeminiQuotaExhausted) as e:
+            await g.summarize("x")
+    assert len(calls) == 1                       # никаких ретраев
+    assert "20" in str(e.value) and "gemini-3.6-flash" in str(e.value)
+
+
+def test_next_model_walks_the_chain_and_ends():
+    assert next_model(FALLBACK_MODELS[0]) == FALLBACK_MODELS[1]
+    assert next_model(FALLBACK_MODELS[-1]) is None
+    assert next_model("какая-то-своя-модель") == FALLBACK_MODELS[0]
 
 
 async def test_429_is_retried_only_three_times():

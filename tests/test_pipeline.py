@@ -5,8 +5,9 @@ import pytest
 
 from zlinbot import filters
 from zlinbot.db import Database
-from zlinbot.gemini import GeminiBadRequest, GeminiBlocked, GeminiError, GeminiQuotaExhausted, Verdict
-from zlinbot.pipeline import MAX_PER_ROUND, Processor
+from zlinbot.gemini import (FALLBACK_MODELS, GeminiBadRequest, GeminiBlocked, GeminiError,
+                            GeminiQuotaExhausted, GeminiRetryable, Verdict)
+from zlinbot.pipeline import MAX_ATTEMPTS, MAX_PER_ROUND, Processor
 
 T0 = 1_789_000_000
 NEWS = "Uzavírka na třídě Tomáše Bati potrvá od 20. září do 30. října, objízdná trasa vede přes Kvítkovou."
@@ -18,10 +19,9 @@ KEEP = Verdict(False, "Uzavírka potrvá do 30. října.", "Перекрытие
 class FakeGemini:
     """Отдаёт заготовленные вердикты или поднимает заготовленные исключения."""
 
-    model = "gemini-2.5-flash"
-
-    def __init__(self, *answers) -> None:
+    def __init__(self, *answers, model: str = "gemini-2.5-flash") -> None:
         self.answers = list(answers)
+        self.model = model
         self.prompts: list[tuple[str, str, str]] = []
 
     async def summarize(self, text, *, source="", criteria=""):
@@ -127,11 +127,76 @@ async def test_garbage_json_marks_post_failed(db):
     assert report.decisions[0].status == "failed" and "нет JSON" in report.decisions[0].note
 
 
+async def test_temporary_failure_keeps_the_post_in_the_queue(db):
+    """Перегрузка модели и минутный лимит — не вина записи. Раньше после трёх ретраев
+    запись помечалась «сломано» навсегда; теперь она ждёт следующего круга."""
+    await add_post(db, "p1", NEWS, seen=T0)
+    processor = Processor(db, FakeGemini(GeminiRetryable("503: high demand")), clock=clock)
+    report = await processor.run()
+
+    assert report.decisions == [] and report.paused_until is None
+    post = await db.get_post("p1")
+    assert post.status == "new" and post.attempts == 1
+
+    processor.gemini = FakeGemini(KEEP)                            # модель ожила
+    report = await processor.run()
+    assert report.count("pending") == 1
+
+
+async def test_endless_temporary_failures_eventually_bury_the_post(db):
+    """Обратная сторона: одна «ядовитая» запись не должна затыкать очередь навсегда."""
+    await add_post(db, "p1", NEWS, seen=T0)
+    processor = Processor(db, FakeGemini(GeminiRetryable("503: high demand")), clock=clock)
+    for _ in range(MAX_ATTEMPTS - 1):
+        assert await processor.run() and (await db.get_post("p1")).status == "new"
+
+    report = await processor.run()
+    assert report.decisions[0].status == "failed"
+    assert f"{MAX_ATTEMPTS} неудачных попыток" in report.decisions[0].note
+    assert "🚨" in report.alerts[0]
+
+
+async def test_daily_quota_switches_to_the_next_model(db):
+    """У каждой модели свой суточный счётчик, поэтому ложиться до полуночи рано:
+    сначала берём следующую модель списка."""
+    await add_post(db, "p1", NEWS, seen=T0)
+    gem = FakeGemini(GeminiQuotaExhausted("квота исчерпана", T0 + 3600), model=FALLBACK_MODELS[0])
+    processor = Processor(db, gem, clock=clock)
+    report = await processor.run()
+
+    assert report.paused_until is None                             # не встали, а переехали
+    assert gem.model == FALLBACK_MODELS[1]
+    assert await db.get_setting("gemini_model") == FALLBACK_MODELS[1]   # переживёт перезапуск
+    assert (await db.get_post("p1")).status == "new"               # запись ждёт в очереди
+    assert "♻️" in report.alerts[0]
+
+
+async def test_after_the_chain_ends_we_wait_and_come_back_to_the_first_model(db):
+    await add_post(db, "p1", NEWS, seen=T0)
+    reset = T0 + 3600
+    gem = FakeGemini(GeminiQuotaExhausted("квота исчерпана", reset), model=FALLBACK_MODELS[0])
+    processor = Processor(db, gem, clock=clock)
+    for _ in range(len(FALLBACK_MODELS) - 1):                      # проходим список до конца
+        await processor.run()
+    assert gem.model == FALLBACK_MODELS[-1]
+
+    report = await processor.run()                                 # запасных больше нет
+    assert report.paused_until == reset and "⏸" in report.alerts[0]
+
+    processor.clock = lambda: reset + 1                            # квоты обновились у всех
+    processor.gemini = gem = FakeGemini(KEEP, model=FALLBACK_MODELS[-1])
+    report = await processor.run()
+    assert gem.model == FALLBACK_MODELS[0]                         # вернулись на основную
+    assert await db.get_setting("gemini_model") == FALLBACK_MODELS[0]
+    assert report.count("pending") == 1
+
+
 async def test_daily_quota_stops_the_round_and_keeps_posts_queued(db):
     await add_post(db, "p1", NEWS, seen=T0)
     await add_post(db, "p2", NEWS + " Jiná zpráva.", seen=T0 + 10)
     reset = T0 + 3600
-    processor = Processor(db, FakeGemini(GeminiQuotaExhausted("квота исчерпана", reset)), clock=clock)
+    processor = Processor(db, FakeGemini(GeminiQuotaExhausted("квота исчерпана", reset),
+                                         model=FALLBACK_MODELS[-1]), clock=clock)
     report = await processor.run()
     assert report.decisions == [] and report.paused_until == reset
     assert "⏸" in report.alerts[0]

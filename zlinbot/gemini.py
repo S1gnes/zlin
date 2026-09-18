@@ -24,7 +24,13 @@ import httpx
 log = logging.getLogger(__name__)
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+
+# Суточная квота бесплатного тарифа считается ОТДЕЛЬНО для каждой модели, и у «больших»
+# flash она смехотворная: у gemini-3.6-flash — 20 запросов в сутки (проверено по quotaValue
+# в ответе 429), у flash-lite — сотни. Поэтому при исчерпании квоты переходим к следующей
+# модели списка, а не ложимся до полуночи: у неё свой счётчик.
+FALLBACK_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash")
 MIN_INTERVAL = 8.0                      # секунд между вызовами: бесплатный тариф ~10–15/мин
 RETRY_DELAYS = (8.0, 20.0, 45.0)        # три ретрая с нарастающей задержкой
 TIMEOUT = 90.0
@@ -298,6 +304,12 @@ def _answer_text(data: dict) -> str:
 def _error_for(r: httpx.Response) -> GeminiError:
     message = _error_message(r)
     if r.status_code == 429:
+        if quota := _daily_quota_violation(r):
+            limit = quota.get("quotaValue") or "?"
+            model = (quota.get("quotaDimensions") or {}).get("model", "")
+            return GeminiQuotaExhausted(
+                f"суточная квота Gemini исчерпана: модель {model or 'неизвестна'}, "
+                f"лимит {limit} запросов в сутки.", next_quota_reset())
         if _is_daily_quota(message):
             return GeminiQuotaExhausted(f"суточная квота Gemini исчерпана: {message}", next_quota_reset())
         return GeminiRetryable(f"429: {message}")
@@ -319,9 +331,39 @@ def _error_message(r: httpx.Response) -> str:
         return r.text[:300]
 
 
+def _daily_quota_violation(r: httpx.Response) -> dict | None:
+    """QuotaFailure из тела ответа: там quotaId и настоящий лимит.
+
+    Разбирать по тексту message нельзя — он длинный, обрезается, и название метрики
+    («...RequestsPerDayPerProjectPerModel-FreeTier») в обрезку не попадает. Из-за этого
+    суточная квота два дня подряд выглядела как временная ошибка, и записи уходили в «сломано».
+    """
+    try:
+        details = (r.json().get("error") or {}).get("details") or []
+    except (ValueError, AttributeError):
+        return None
+    for detail in details:
+        if not isinstance(detail, dict) or "QuotaFailure" not in str(detail.get("@type", "")):
+            continue
+        for violation in detail.get("violations") or []:
+            if "perday" in str(violation.get("quotaId", "")).lower():
+                return violation
+    return None
+
+
 def _is_daily_quota(message: str) -> bool:
     low = message.lower()
     return "perday" in low.replace(" ", "") or "per day" in low or "daily" in low
+
+
+def next_model(current: str, chain: tuple[str, ...] = FALLBACK_MODELS) -> str | None:
+    """Следующая модель после исчерпания суточной квоты текущей. None — список кончился.
+
+    Модель не из списка (выбрана вручную) — начинаем список с начала."""
+    if current in chain:
+        index = chain.index(current) + 1
+        return chain[index] if index < len(chain) else None
+    return chain[0] if chain else None
 
 
 def next_quota_reset(now: float | None = None) -> float:

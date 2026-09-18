@@ -4,9 +4,12 @@
 Порядок важен: сначала бесплатный отсев по стоп-словам, и только потом Gemini —
 у бесплатного тарифа считается каждый вызов.
 
-Отдельно разведены три вида сбоя модели, потому что реагировать на них надо по-разному:
-- суточная квота: ретраи бессмысленны, встаём до сброса и говорим в личку;
+Отдельно разведены четыре вида сбоя модели, потому что реагировать на них надо по-разному:
+- суточная квота: ретраи бессмысленны; берём следующую модель (у неё свой счётчик),
+  а когда список кончится — встаём до сброса и говорим в личку;
 - 400 (модель снята, ключ не принят): круг останавливаем, само не пройдёт;
+- временный сбой (перегрузка, минутный лимит, сеть): запись остаётся в очереди, круг
+  прерываем до следующего раза — виновата модель, а не запись;
 - фильтр безопасности или мусор вместо JSON: это про одну запись, помечаем её и идём дальше.
 """
 from __future__ import annotations
@@ -20,13 +23,14 @@ from . import filters
 from .db import Database, StoredPost
 from .media import DownloadReport, MediaStore
 from .gemini import (DEFAULT_CRITERIA, DEFAULT_MODEL, GeminiBadRequest, GeminiBlocked, GeminiError,
-                     GeminiQuotaExhausted, Verdict)
+                     GeminiQuotaExhausted, GeminiRetryable, Verdict, next_model)
 from .textnorm import significant
 
 log = logging.getLogger(__name__)
 
 MAX_PER_ROUND = 8   # из ТЗ: не более 8 записей за круг
 MIN_TEXT = 20       # значащих символов; короче — пересказывать нечего
+MAX_ATTEMPTS = 10   # столько кругов запись ждёт живую модель, потом всё-таки в «сломано»
 
 
 @dataclass
@@ -67,6 +71,7 @@ class Processor:
         self.clock = clock
         self.limit = limit
         self._paused_until: float | None = None  # пауза до сброса суточной квоты
+        self._preferred_model: str | None = None  # модель до перехода на запасную
 
     async def run(self) -> ProcessReport:
         report = ProcessReport(paused_until=self._paused_until)
@@ -76,6 +81,7 @@ class Processor:
         if self._paused_until:
             report.alerts.append("✅ Суточная квота Gemini обновилась, продолжаю разбор.")
             self._paused_until = report.paused_until = None
+            await self._restore_model(report)
         if self.gemini is None:
             return report
 
@@ -102,16 +108,15 @@ class Processor:
         try:
             verdict = await self.gemini.summarize(text, source=source, criteria=criteria)
         except GeminiQuotaExhausted as e:
-            self._paused_until = report.paused_until = e.reset_at
-            report.alerts.append(
-                f"⏸ {e} Разбор встал до сброса квоты; собирать записи продолжаю, они подождут в очереди.")
-            return None
+            return await self._quota_exhausted(e, report)
         except GeminiBadRequest as e:
             report.alerts.append(f"🚨 Gemini не принимает запрос: {e}\nПроверь ключ и название модели "
                                  f"(актуальный список — команда models). Разбор остановлен.")
             return None
         except GeminiBlocked as e:
             return await self._decide(post, "failed", f"модель не дала ответ: {e}")
+        except GeminiRetryable as e:
+            return await self._postpone(post, e, report)
         except GeminiError as e:
             return await self._decide(post, "failed", f"ошибка разбора ответа: {e}")
 
@@ -131,6 +136,47 @@ class Processor:
             decision.media = await self.store.fetch(draft_id, post.media)
         await self.db.log("drafted", post_id=post.post_id, now=self.clock())
         return decision
+
+    async def _quota_exhausted(self, error: GeminiQuotaExhausted, report: ProcessReport) -> None:
+        """Суточная квота модели кончилась. Счётчик у каждой модели свой, поэтому сначала
+        берём следующую из списка и только когда он кончится — ждём полуночи."""
+        current = getattr(self.gemini, "model", "")
+        following = next_model(current)
+        if self.gemini is not None and following and following != current:
+            self._preferred_model = self._preferred_model or current
+            self.gemini.model = following
+            await self.db.set_setting("gemini_model", following)
+            log.warning("квота модели %s исчерпана, перехожу на %s", current, following)
+            report.alerts.append(f"♻️ {error}\nПерехожу на <b>{following}</b> — у неё отдельная "
+                                 f"суточная квота. Вернусь на {self._preferred_model} после сброса.")
+            return None
+        self._paused_until = report.paused_until = error.reset_at
+        report.alerts.append(
+            f"⏸ {error} Запасные модели тоже исчерпаны. Разбор встал до сброса квоты; "
+            f"собирать записи продолжаю, они подождут в очереди.")
+        return None
+
+    async def _restore_model(self, report: ProcessReport) -> None:
+        """Квоты обновились — возвращаемся на модель, с которой начинали."""
+        if self.gemini is None or not self._preferred_model:
+            return
+        self.gemini.model = self._preferred_model
+        await self.db.set_setting("gemini_model", self._preferred_model)
+        report.alerts.append(f"↩️ Вернулся на модель {self._preferred_model}.")
+        self._preferred_model = None
+
+    async def _postpone(self, post: StoredPost, error: GeminiRetryable,
+                        report: ProcessReport) -> Decision | None:
+        """Временный сбой модели: запись не виновата, она остаётся в очереди и ждёт следующего
+        круга. Но вечно ждать нельзя — иначе одна «ядовитая» запись затыкает очередь целиком."""
+        attempts = await self.db.bump_attempts(post.post_id, now=self.clock())
+        if attempts >= MAX_ATTEMPTS:
+            report.alerts.append(f"🚨 Запись не разобралась с {attempts} попыток, помечаю сломанной:\n"
+                                 f"{post.permalink}\n{error}")
+            return await self._decide(post, "failed", f"{attempts} неудачных попыток: {error}")
+        log.info("временный сбой модели (попытка %d из %d), запись остаётся в очереди: %s",
+                 attempts, MAX_ATTEMPTS, error)
+        return None
 
     async def _decide(self, post: StoredPost, status: str, note: str | None, *,
                       verdict: Verdict | None = None) -> Decision:
