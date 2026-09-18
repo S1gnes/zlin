@@ -1,5 +1,5 @@
 """
-Публикация черновика в канал и перевод первым комментарием.
+Публикация черновика в канал.
 
 Двойное нажатие «Опубликовать» ловится не проверкой в памяти, а атомарной сменой статуса
 в БД: pending -> publishing. Кто успел — тот и публикует, второй получает отказ. Если
@@ -10,9 +10,8 @@ Telegram отказал, статус возвращается в pending, чт�
 медиа не принял (а он привередлив к форматам), пост всё равно выходит текстом: терять
 новость из-за картинки нельзя.
 
-Перевод кладётся первым комментарием: Telegram сам пересылает пост канала в привязанную
-группу обсуждений, и бот отвечает на эту пересылку. Если группы обсуждений нет, перевод
-уходит под спойлером в самом посте (решается при старте, см. app.check_channel).
+Переводы идут в самом посте, отдельными абзацами. Комментарий в группе обсуждений больше
+не пишется: половина читателей его не открывала, а пост и так самодостаточен.
 """
 from __future__ import annotations
 
@@ -26,7 +25,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (FSInputFile, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions, Message,
                            ReplyParameters)
 
-from ..db import Database, Draft
+from ..db import Database
 from ..media import LocalMedia, MediaStore
 from . import texts
 
@@ -41,7 +40,6 @@ class PublishResult:
     ok: bool
     draft_id: int
     link: str | None = None
-    with_spoiler: bool = False   # перевод ушёл в самом посте, а не комментарием
     media_sent: int = 0
     media_failed: bool = False   # медиа не приняли — вышел текст
     reason: str | None = None
@@ -49,13 +47,12 @@ class PublishResult:
 
 class Publisher:
     def __init__(self, bot: Bot, db: Database, channel_id: str | int, *,
-                 channel_username: str | None = None, discussion_chat_id: int | None = None,
+                 channel_username: str | None = None,
                  store: MediaStore | None = None, clock: Callable[[], float] = time.time) -> None:
         self.bot = bot
         self.db = db
         self.channel_id = channel_id
         self.channel_username = channel_username
-        self.discussion_chat_id = discussion_chat_id
         self.store = store
         self.clock = clock
 
@@ -68,8 +65,7 @@ class Publisher:
             return PublishResult(False, draft_id, reason="черновик или исходная запись потерялись")
         group = await self.db.get_group(post.group_id) if post.group_id else None
 
-        spoiler = self.discussion_chat_id is None
-        text = texts.channel_post(draft, post, group, with_spoiler=spoiler)
+        text = texts.channel_post(draft, post, group)
         media = await self._media_for(draft_id)
         try:
             message, sent, failed = await self._send(text, media)
@@ -84,7 +80,7 @@ class Publisher:
         await self.db.log("published", group_id=post.group_id, post_id=post.post_id, now=self.clock())
         if self.store:
             self.store.clear(draft_id)
-        return PublishResult(True, draft_id, self._link(message.message_id), with_spoiler=spoiler,
+        return PublishResult(True, draft_id, self._link(message.message_id),
                              media_sent=sent, media_failed=failed)
 
     async def reject(self, draft_id: int) -> bool:
@@ -97,24 +93,6 @@ class Publisher:
         if self.store:
             self.store.clear(draft_id)
         return True
-
-    async def on_channel_forward(self, message: Message) -> int | None:
-        """Служебная пересылка поста канала в группу обсуждений — отвечаем на неё переводом."""
-        origin_id = getattr(message.forward_origin, "message_id", None)
-        if origin_id is None:
-            return None
-        draft = await self.db.draft_by_channel_msg(origin_id)
-        if draft is None or draft.comment_msg_id or not texts.translations(draft):
-            return None
-        try:
-            comment = await self.bot.send_message(
-                message.chat.id, texts.translation_comment(draft), link_preview_options=NO_PREVIEW,
-                reply_parameters=ReplyParameters(message_id=message.message_id))
-        except TelegramAPIError as e:
-            log.warning("черновик #%s: перевод комментарием не ушёл: %s", draft.id, e)
-            return None
-        await self.db.set_draft_comment(draft.id, comment.message_id)
-        return comment.message_id
 
     # -- внутреннее ----------------------------------------------------------
 

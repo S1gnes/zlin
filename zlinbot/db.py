@@ -142,7 +142,12 @@ _V5 = """
 ALTER TABLE posts ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5)
+# v6: английский перевод — в посте теперь четыре языка
+_V6 = """
+ALTER TABLE drafts ADD COLUMN summary_en TEXT;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5, _V6)
 
 _GROUP_COLUMNS = frozenset({"url", "slug", "fb_id", "name", "status", "fail_streak", "last_status",
                             "last_checked_at", "last_ok_at", "etag", "last_modified"})
@@ -184,7 +189,8 @@ class Draft:
     channel_msg_id: int | None
     created_at: int
     decided_at: int | None
-    comment_msg_id: int | None = None   # комментарий с переводом в группе обсуждений
+    comment_msg_id: int | None = None   # не используется с 18.09: перевод идёт в самом посте
+    summary_en: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,11 +401,11 @@ class Database:
 
     async def add_draft(self, *, post_id: str, summary: str, summary_ru: str | None,
                         facts: Iterable[str], model: str | None, now: float,
-                        summary_ua: str | None = None) -> int:
+                        summary_ua: str | None = None, summary_en: str | None = None) -> int:
         cur = await self._write(
-            "INSERT INTO drafts (post_id, summary, summary_ru, summary_ua, facts_json, model, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (post_id, summary, summary_ru, summary_ua,
+            "INSERT INTO drafts (post_id, summary, summary_ru, summary_ua, summary_en, facts_json, "
+            "model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (post_id, summary, summary_ru, summary_ua, summary_en,
              json.dumps(list(facts), ensure_ascii=False), model, int(now)))
         return int(cur.lastrowid)
 
@@ -413,19 +419,9 @@ class Database:
         rows = await self._rows(sql + " ORDER BY created_at, id LIMIT ?", (*params, limit))
         return [_draft(r) for r in rows]
 
-    async def draft_by_channel_msg(self, channel_msg_id: int) -> Draft | None:
-        """Черновик по номеру поста в канале: так служебная пересылка в группу обсуждений
-        находит, к чему приписать перевод, даже если бота перезапустили."""
-        rows = await self._rows("SELECT * FROM drafts WHERE channel_msg_id = ? LIMIT 1", (channel_msg_id,))
-        return _draft(rows[0]) if rows else None
-
     async def set_draft_message(self, draft_id: int, admin_msg_id: int) -> None:
         """Запомнить карточку в личке, не трогая статус: по ней потом убираются кнопки."""
         await self._write("UPDATE drafts SET admin_msg_id = ? WHERE id = ?", (admin_msg_id, draft_id))
-
-    async def set_draft_comment(self, draft_id: int, comment_msg_id: int) -> bool:
-        return (await self._write("UPDATE drafts SET comment_msg_id = ? WHERE id = ? AND comment_msg_id IS NULL",
-                                  (comment_msg_id, draft_id))).rowcount == 1
 
     async def set_draft_status(self, draft_id: int, status: str, *, expect: Iterable[str] | None = None,
                                now: float | None = None, **fields: Any) -> bool:

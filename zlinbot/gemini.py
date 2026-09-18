@@ -46,9 +46,10 @@ RESPONSE_SCHEMA = {
         "post": {"type": "string"},
         "post_ru": {"type": "string"},
         "post_ua": {"type": "string"},
+        "post_en": {"type": "string"},
         "facts": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["skip", "post", "post_ru", "post_ua", "facts"],
+    "required": ["skip", "post", "post_ru", "post_ua", "post_en", "facts"],
 }
 
 DEFAULT_CRITERIA = (
@@ -75,10 +76,12 @@ PROMPT = """Ты редактор телеграм-канала о жизни г
 4. "post_ru" — тот же пересказ по-русски, так же кратко.
 5. "post_ua" — тот же пересказ по-украински, так же кратко. Это отдельный язык, а не
    переделка русского текста: пиши естественной украинской лексикой.
-6. "facts" — 1–3 коротких факта из записи по-чешски (цифры, даты, места), чтобы можно было
+6. "post_en" — тот же пересказ по-английски, так же кратко. Чешские названия улиц, районов
+   и учреждений оставляй как есть, не переводи их на английский.
+7. "facts" — 1–3 коротких факта из записи по-чешски (цифры, даты, места), чтобы можно было
    сверить пересказ с оригиналом.
-7. Не называй по имени частных лиц. Названия организаций, должности и публичные лица — можно.
-8. Если запись каналу не подходит, "skip": true, а "post", "post_ru", "post_ua" и "facts" — пустые.
+8. Не называй по имени частных лиц. Названия организаций, должности и публичные лица — можно.
+9. Если запись каналу не подходит, "skip": true, а все пересказы и "facts" — пустые.
 
 {extra}ИСТОЧНИК: {source}
 ЗАПИСЬ:
@@ -118,6 +121,7 @@ class Verdict:
     post: str = ""
     post_ru: str = ""
     post_ua: str = ""
+    post_en: str = ""
     facts: tuple[str, ...] = ()
     model: str = ""
     raw: str = field(default="", repr=False)
@@ -141,6 +145,7 @@ def parse_response(text: str) -> Verdict:
         post=_clean(data.get("post")),
         post_ru=_clean(data.get("post_ru")),
         post_ua=_clean(data.get("post_ua")),
+        post_en=_clean(data.get("post_en")),
         facts=tuple(_clean(f) for f in facts if _clean(f))[:3],
         raw=text,
     )
@@ -243,8 +248,8 @@ class Gemini:
         }
         data = await self._post(f"{API_ROOT}/models/{self.model}:generateContent", body)
         verdict = parse_response(_answer_text(data))
-        return Verdict(verdict.skip, verdict.post, verdict.post_ru, verdict.post_ua, verdict.facts,
-                       self.model, verdict.raw)
+        return Verdict(verdict.skip, verdict.post, verdict.post_ru, verdict.post_ua, verdict.post_en,
+                       verdict.facts, self.model, verdict.raw)
 
     # -- внутреннее ----------------------------------------------------------
 

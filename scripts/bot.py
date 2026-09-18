@@ -90,10 +90,8 @@ async def main_async() -> None:
         processor = Processor(db, gemini, store=store)
 
         info = await check_channel(bot, cfg.channel_id)
-        publisher = Publisher(bot, db, cfg.channel_id, channel_username=info.username,
-                              discussion_chat_id=info.discussion_chat_id, store=store)
-        dp = build_dispatcher(db, publisher, gemini, admin_id=cfg.admin_id,
-                              discussion_chat_id=info.discussion_chat_id, store=store,
+        publisher = Publisher(bot, db, cfg.channel_id, channel_username=info.username, store=store)
+        dp = build_dispatcher(db, publisher, gemini, admin_id=cfg.admin_id, store=store,
                               collector=collector)
 
         async def notify(text: str) -> None:

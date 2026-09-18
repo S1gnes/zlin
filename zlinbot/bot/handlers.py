@@ -86,7 +86,7 @@ async def on_publish(query: CallbackQuery, callback_data: DraftAction, publisher
     draft = await publisher.db.get_draft(result.draft_id)
     await query.answer("Опубликовано")
     await _drop_buttons(query)
-    await query.message.answer(texts.published_note(draft, result.link, commented=not result.with_spoiler))
+    await query.message.answer(texts.published_note(draft, result.link))
 
 
 async def on_reject(query: CallbackQuery, callback_data: DraftAction, publisher: Publisher) -> None:
@@ -120,11 +120,6 @@ async def on_instruction(message: Message, state: FSMContext, bot: Bot, db: Data
         await _rewrite(bot, db, gemini, message, int(draft_id), message.text or "", store)
 
 
-async def on_channel_forward(message: Message, publisher: Publisher) -> None:
-    """Пересылка поста канала в группу обсуждений: отвечаем на неё переводом."""
-    await publisher.on_channel_forward(message)
-
-
 async def _rewrite(bot: Bot, db: Database, gemini: Summarizer | None, message: Message,
                    draft_id: int, instruction: str, store: MediaStore | None = None) -> None:
     if gemini is None:
@@ -150,7 +145,6 @@ def make_router() -> Router:
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_start, Command("help"))
     router.message.register(cmd_pending, Command("pending"))
-    router.message.register(on_channel_forward, F.is_automatic_forward)
     router.message.register(on_instruction, Rewriting.waiting_instruction, F.text)
     router.callback_query.register(on_publish, DraftAction.filter(F.action == "publish"))
     router.callback_query.register(on_reject, DraftAction.filter(F.action == "reject"))

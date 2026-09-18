@@ -16,35 +16,36 @@ MAX_TEXT = 4096
 MAX_CAPTION = 1024   # пригодится на этапе 5: у media group подпись короче
 
 SOURCE_MARK = "📍"
-LINK_MARK = "🔗"
 # Переводы помечаем кодом языка, а не флагом: флаг обозначает страну, а не язык,
 # и в этом канале такой подтекст ни к чему.
-LANG_MARKS = (("ru", "RU"), ("ua", "UA"))
+LANG_MARKS = (("ru", "RU"), ("ua", "UA"), ("en", "EN"))
+SEP = " · "          # между меткой языка и текстом
 
 
-def channel_post(draft: Draft, post: StoredPost, group: Group | None, *, with_spoiler: bool) -> str:
+def channel_post(draft: Draft, post: StoredPost, group: Group | None) -> str:
     """Формат из ТЗ: пересказ, источник, ссылка на оригинал. Указание источника не отключается.
 
-    with_spoiler — к каналу не привязана группа обсуждений, поэтому перевод кладём
-    под спойлер прямо в пост: иначе он потеряется совсем.
+    Чешский идёт ведущим абзацем без метки, переводы — отдельными абзацами с меткой языка.
+    Ссылка спрятана в название источника: голый URL в конце поста только шумит.
     """
     parts = [escape(draft.summary).strip()]
-    source = escape(group.title if group else (post.author or "источник"))
-    parts.append(f"{SOURCE_MARK} {source}\n{LINK_MARK} {escape(post.permalink)}")
-    if with_spoiler and (body := translations(draft)):
-        parts.append(f"<tg-spoiler>{body}</tg-spoiler>")
+    if body := translations(draft):
+        parts.append(body)
+    parts.append(f"{SOURCE_MARK} {source_link(post, group)}")
     return _fit("\n\n".join(parts), MAX_TEXT)
 
 
+def source_link(post: StoredPost, group: Group | None) -> str:
+    """Название источника ссылкой на оригинал. Без permalink — просто название."""
+    name = escape(group.title if group else (post.author or "источник"))
+    return f'<a href="{escape(post.permalink, quote=True)}">{name}</a>' if post.permalink else name
+
+
 def translations(draft: Draft) -> str:
-    """Переводы одним блоком: «RU: …» и «UA: …». Пусто, если переводов нет."""
-    return "\n\n".join(f"{mark}: {escape(text)}"
+    """Переводы абзацами: «RU · …», «UA · …», «EN · …». Пусто, если переводов нет."""
+    return "\n\n".join(f"{mark}{SEP}{escape(text)}"
                        for code, mark in LANG_MARKS
                        if (text := getattr(draft, f"summary_{code}", None)))
-
-
-def translation_comment(draft: Draft) -> str:
-    return _fit(translations(draft), MAX_TEXT)
 
 
 def draft_card(draft: Draft, post: StoredPost, group: Group | None, *, media_ready: int = 0) -> str:
@@ -65,9 +66,8 @@ def draft_card(draft: Draft, post: StoredPost, group: Group | None, *, media_rea
     return _fit("\n".join(lines), MAX_TEXT)
 
 
-def published_note(draft: Draft, link: str | None, *, commented: bool) -> str:
-    tail = "перевод ушёл первым комментарием" if commented else "перевод под спойлером в посте"
-    return f"✅ Черновик #{draft.id} опубликован ({tail})." + (f"\n{link}" if link else "")
+def published_note(draft: Draft, link: str | None) -> str:
+    return f"✅ Черновик #{draft.id} опубликован." + (f"\n{link}" if link else "")
 
 
 def fmt_when(ts: float | None) -> str:

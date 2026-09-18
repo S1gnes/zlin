@@ -11,7 +11,7 @@ from zlinbot.db import Database
 from zlinbot.gemini import Verdict
 
 T0 = 1_789_000_000
-REWRITTEN = Verdict(False, "Kratší verze.", "Короче.", "Коротше.", ("fakt",),
+REWRITTEN = Verdict(False, "Kratší verze.", "Короче.", "Коротше.", "Shorter.", ("fakt",),
                     model="gemini-2.5-flash")
 
 
@@ -41,16 +41,16 @@ async def env(tmp_path):
         draft_id = await db.add_draft(post_id="rss:a", summary="Uzavírka potrvá do 30. října.",
                                       summary_ru="Перекрытие продлится до 30 октября.",
                                       summary_ua="Перекриття триватиме до 30 жовтня.",
+                                      summary_en="The closure lasts until 30 October.",
                                       facts=["od 20. září"], model="gemini-2.5-flash", now=T0)
         bot, session = make_bot()
         gemini = FakeGemini()
         yield db, bot, session, gemini, draft_id
 
 
-def dispatcher(db, bot, gemini, *, discussion=None, session=None):
-    publisher = Publisher(bot, db, CHANNEL_ID, channel_username="zlin_kanal",
-                          discussion_chat_id=discussion, clock=lambda: T0)
-    return build_dispatcher(db, publisher, gemini, admin_id=ADMIN_ID, discussion_chat_id=discussion)
+def dispatcher(db, bot, gemini, *, session=None):
+    publisher = Publisher(bot, db, CHANNEL_ID, channel_username="zlin_kanal", clock=lambda: T0)
+    return build_dispatcher(db, publisher, gemini, admin_id=ADMIN_ID)
 
 
 # -- доступ --------------------------------------------------------------------
@@ -96,7 +96,8 @@ async def test_publish_posts_to_channel_in_the_required_format(env):
 
     post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
     assert post.text.startswith("Uzavírka potrvá do 30. října.")
-    assert "📍 ZLIN.CZ" in post.text and "🔗 https://zlin.cz/zpravy/a/" in post.text
+    assert '📍 <a href="https://zlin.cz/zpravy/a/">ZLIN.CZ</a>' in post.text   # ссылка в гипертексте
+    assert "🔗 https://" not in post.text                            # голого URL в посте больше нет
     assert post.link_preview_options.is_disabled is True
     assert (await db.get_draft(draft_id)).status == "published"
     assert (await db.get_post("rss:a")).status == "published"
@@ -126,34 +127,34 @@ async def test_telegram_refusal_returns_draft_to_the_queue(env):
     assert (await db.get_post("rss:a")).status == "pending"
 
 
-async def test_without_discussion_group_translation_goes_under_spoiler(env):
+async def test_all_four_languages_go_in_the_post_itself(env):
+    """Переводы больше не уходят комментарием в группу обсуждений: пост самодостаточен."""
     db, bot, session, gemini, draft_id = env
-    dp = dispatcher(db, bot, gemini, discussion=None)
+    dp = dispatcher(db, bot, gemini)
     await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
     post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
-    assert ("<tg-spoiler>RU: Перекрытие продлится до 30 октября.\n\n"
-            "UA: Перекриття триватиме до 30 жовтня.</tg-spoiler>") in post.text
-    assert "🇷🇺" not in post.text          # флагов стран в посте нет
+
+    assert post.text.startswith("Uzavírka potrvá do 30. října.\n\n")   # чешский ведущим абзацем
+    assert "RU · Перекрытие продлится до 30 октября." in post.text
+    assert "UA · Перекриття триватиме до 30 жовтня." in post.text
+    assert "EN · The closure lasts until 30 October." in post.text
+    assert "tg-spoiler" not in post.text                            # спойлера больше нет
+    assert "🇷🇺" not in post.text                                    # флагов стран в посте нет
+    assert post.text.index("RU ·") < post.text.index("UA ·") < post.text.index("EN ·")
+    assert post.text.rstrip().endswith("</a>")                      # источник со ссылкой — последним
 
 
-async def test_with_discussion_group_translation_goes_as_first_comment(env):
+async def test_channel_forward_no_longer_produces_a_comment(env):
+    """Служебная пересылка в группу обсуждений больше не обрабатывается вообще."""
     db, bot, session, gemini, draft_id = env
-    dp = dispatcher(db, bot, gemini, discussion=DISCUSSION_ID)
+    dp = dispatcher(db, bot, gemini)
     await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
-    post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
-    assert "tg-spoiler" not in post.text                            # перевод пойдёт комментарием
     channel_msg_id = (await db.get_draft(draft_id)).channel_msg_id
+    before = session.count("SendMessage")
 
     await dp.feed_update(bot, forward_update(channel_msg_id, update_id=2))
-    comment = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == DISCUSSION_ID)
-    assert comment.text == ("RU: Перекрытие продлится до 30 октября.\n\n"
-                            "UA: Перекриття триватиме до 30 жовтня.")
-    assert comment.reply_parameters.message_id == 7001
-    assert (await db.get_draft(draft_id)).comment_msg_id is not None
-
-    before = session.count("SendMessage")                           # повторная пересылка — не второй комментарий
-    await dp.feed_update(bot, forward_update(channel_msg_id, update_id=3))
     assert session.count("SendMessage") == before
+    assert (await db.get_draft(draft_id)).comment_msg_id is None
 
 
 # -- отклонение и переписывание ------------------------------------------------
@@ -228,16 +229,15 @@ async def startup(*, linked: int | None, in_channel: str = "administrator",
     return info, startup_report(info)
 
 
-async def test_startup_warns_when_no_discussion_group():
-    info, report = await startup(linked=None)
-    assert info.discussion_chat_id is None
-    assert "под спойлером" in report and "⚠️" in report
-
-
 async def test_startup_is_quiet_when_everything_is_fine():
     info, report = await startup(linked=DISCUSSION_ID)
-    assert info.discussion_chat_id == DISCUSSION_ID
-    assert "Проблем не вижу" in report and "первым комментарием" in report
+    assert info.ok and "Проблем не вижу" in report
+
+
+async def test_startup_says_nothing_about_discussion_group_any_more():
+    """Группа обсуждений боту больше не нужна — и её отсутствие не повод для тревоги."""
+    _, report = await startup(linked=None)
+    assert "Проблем не вижу" in report and "обсужден" not in report
 
 
 async def test_startup_warns_when_bot_is_not_channel_admin():
@@ -250,14 +250,9 @@ async def test_startup_warns_when_bot_cannot_post():
     assert "нет права публиковать" in report
 
 
-async def test_startup_warns_when_bot_is_not_admin_in_discussion_group():
-    _, report = await startup(linked=DISCUSSION_ID, in_group="member")
-    assert "в группе обсуждений не администратор" in report
-
-
 # -- медиа ---------------------------------------------------------------------
 
-def with_media(db, bot, gemini, tmp_path, *, files: int = 1, mode: str = "copy", discussion=None):
+def with_media(db, bot, gemini, tmp_path, *, files: int = 1, mode: str = "copy"):
     """Публикатор с кэшем медиа: кладём файлы так, как их кладёт MediaStore."""
     from zlinbot.media import MediaStore
     store = MediaStore(tmp_path / "media")
@@ -266,9 +261,8 @@ def with_media(db, bot, gemini, tmp_path, *, files: int = 1, mode: str = "copy",
     for i in range(files):
         (folder / f"{i:02d}-photo-p{i}.jpg").write_bytes(b"\xff\xd8\xff" + b"x" * 100)
     publisher = Publisher(bot, db, CHANNEL_ID, channel_username="zlin_kanal",
-                          discussion_chat_id=discussion, store=store, clock=lambda: T0)
-    return build_dispatcher(db, publisher, gemini, admin_id=ADMIN_ID, discussion_chat_id=discussion,
-                            store=store), store
+                          store=store, clock=lambda: T0)
+    return build_dispatcher(db, publisher, gemini, admin_id=ADMIN_ID, store=store), store
 
 
 async def test_single_photo_goes_with_caption(env, tmp_path):
@@ -277,7 +271,8 @@ async def test_single_photo_goes_with_caption(env, tmp_path):
     await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
     sent = session.last("SendPhoto")
     assert sent.chat_id == CHANNEL_ID
-    assert "📍 ZLIN.CZ" in sent.caption and "Uzavírka potrvá" in sent.caption
+    assert '📍 <a href="https://zlin.cz/zpravy/a/">ZLIN.CZ</a>' in sent.caption
+    assert "Uzavírka potrvá" in sent.caption
     assert store.files(draft_id) == []                      # файлы убраны после публикации
 
 
