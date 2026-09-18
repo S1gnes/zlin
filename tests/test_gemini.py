@@ -5,14 +5,16 @@ import time
 import httpx
 import pytest
 
-from zlinbot.gemini import (DEFAULT_CRITERIA, DEFAULT_MODEL, FALLBACK_MODELS, Gemini, GeminiBadRequest,
-                            GeminiBlocked, GeminiError, GeminiQuotaExhausted, GeminiRetryable,
-                            build_prompt, next_model, parse_response)
+from zlinbot.gemini import (ALLOWED_EMOJI, DEFAULT_CRITERIA, DEFAULT_EMOJI, DEFAULT_MODEL,
+                            FALLBACK_MODELS, Gemini, GeminiBadRequest, GeminiBlocked, GeminiError,
+                            GeminiQuotaExhausted, GeminiRetryable, build_prompt, next_model,
+                            parse_response, pick_emoji)
 
 ANSWER = {"skip": False, "post": "Od 20. září bude uzavřena třída Tomáše Bati.",
           "post_ru": "С 20 сентября улица Томаша Бати будет закрыта.",
           "post_ua": "З 20 вересня вулиця Томаша Баті буде закрита.",
           "post_en": "Tomáše Bati Avenue will be closed from 20 September.",
+          "emoji": "🚧",
           "facts": ["uzavírka od 20. září", "třída Tomáše Bati"]}
 
 
@@ -56,6 +58,34 @@ def test_sloppy_field_types_are_survived():
     assert v.skip is True and v.facts == ("один факт",)
     v = parse_response('{"skip": false, "post": " a \\n b ", "facts": ["1", "2", "3", "4"], "post_ru": null}')
     assert v.post == "a b" and len(v.facts) == 3 and v.post_ru == ""
+
+
+def test_emoji_is_taken_only_from_the_list():
+    """Модель регулярно добавляет своё поверх списка — в пост должно попасть только наше."""
+    assert pick_emoji("🚧") == "🚧"
+    assert pick_emoji("🚧🚌") == "🚧 🚌"
+    assert pick_emoji("🚌🚧") == "🚌 🚧"                  # порядок из ответа сохраняется
+    assert pick_emoji("🚧🚌💧🏛") == "🚧 🚌"               # не больше двух
+    assert pick_emoji("😀🤖🇷🇺") == DEFAULT_EMOJI         # лица и флаги стран отсеиваются
+    assert pick_emoji("") == DEFAULT_EMOJI
+    assert pick_emoji("Вот эмодзи: 🚧, подойдёт") == "🚧"  # пояснения вокруг не мешают
+
+
+def test_emoji_survives_a_missing_variation_selector():
+    """⚠ модель отдаёт то с U+FE0F, то без; в посте всегда каноническая форма."""
+    assert pick_emoji("⚠") == "⚠️" and pick_emoji("⚠️") == "⚠️"
+
+
+def test_skip_verdict_has_no_emoji():
+    v = parse_response('{"skip": true, "post": "", "emoji": "🚧", "facts": []}')
+    assert v.skip is True and v.emoji == ""
+
+
+def test_prompt_lists_the_allowed_emoji():
+    prompt = build_prompt("x", source="s")
+    assert "без флагов стран" in prompt
+    for mark, _ in ALLOWED_EMOJI:
+        assert mark in prompt
 
 
 def test_prompt_carries_rules_and_content():
@@ -102,7 +132,7 @@ async def test_successful_call_sends_key_and_json_contract():
     cfg = seen["body"]["generationConfig"]
     assert cfg["responseMimeType"] == "application/json"
     assert cfg["responseSchema"]["required"] == ["skip", "post", "post_ru", "post_ua",
-                                                 "post_en", "facts"]
+                                                 "post_en", "emoji", "facts"]
 
 
 async def test_429_per_minute_is_retried_then_succeeds():

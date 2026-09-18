@@ -147,7 +147,12 @@ _V6 = """
 ALTER TABLE drafts ADD COLUMN summary_en TEXT;
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5, _V6)
+# v7: эмодзи к теме записи — его выбирает модель, хранится рядом с пересказом
+_V7 = """
+ALTER TABLE drafts ADD COLUMN emoji TEXT;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2, _V3, _V4, _V5, _V6, _V7)
 
 _GROUP_COLUMNS = frozenset({"url", "slug", "fb_id", "name", "status", "fail_streak", "last_status",
                             "last_checked_at", "last_ok_at", "etag", "last_modified"})
@@ -191,6 +196,7 @@ class Draft:
     decided_at: int | None
     comment_msg_id: int | None = None   # не используется с 18.09: перевод идёт в самом посте
     summary_en: str | None = None
+    emoji: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,11 +407,12 @@ class Database:
 
     async def add_draft(self, *, post_id: str, summary: str, summary_ru: str | None,
                         facts: Iterable[str], model: str | None, now: float,
-                        summary_ua: str | None = None, summary_en: str | None = None) -> int:
+                        summary_ua: str | None = None, summary_en: str | None = None,
+                        emoji: str | None = None) -> int:
         cur = await self._write(
-            "INSERT INTO drafts (post_id, summary, summary_ru, summary_ua, summary_en, facts_json, "
-            "model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (post_id, summary, summary_ru, summary_ua, summary_en,
+            "INSERT INTO drafts (post_id, summary, summary_ru, summary_ua, summary_en, emoji, "
+            "facts_json, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (post_id, summary, summary_ru, summary_ua, summary_en, emoji,
              json.dumps(list(facts), ensure_ascii=False), model, int(now)))
         return int(cur.lastrowid)
 

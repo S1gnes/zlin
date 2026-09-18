@@ -47,10 +47,37 @@ RESPONSE_SCHEMA = {
         "post_ru": {"type": "string"},
         "post_ua": {"type": "string"},
         "post_en": {"type": "string"},
+        "emoji": {"type": "string"},
         "facts": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["skip", "post", "post_ru", "post_ua", "post_en", "facts"],
+    "required": ["skip", "post", "post_ru", "post_ua", "post_en", "emoji", "facts"],
 }
+
+# Эмодзи к теме записи выбирает модель, но только из этого списка: свободный выбор даёт
+# то смайлики-лица, то флаги стран. Порядок здесь же задаёт порядок в посте.
+ALLOWED_EMOJI: tuple[tuple[str, str], ...] = (
+    ("🚧", "дорожные работы, перекрытия, объезды"),
+    ("🚌", "общественный транспорт, поезда, остановки"),
+    ("🚗", "движение, парковки, автомобили"),
+    ("💧", "вода: отключения, аварии, водоёмы"),
+    ("⚡", "электричество: отключения, аварии"),
+    ("🔥", "пожар"),
+    ("🚑", "происшествие, пострадавшие, медпомощь"),
+    ("👮", "полиция, розыск, правонарушения"),
+    ("🏛", "решения города и края, бюджет, выборы"),
+    ("🏗", "стройка, ремонт зданий, новые объекты"),
+    ("🎭", "культура: концерты, спектакли, выставки"),
+    ("🎉", "праздники, ярмарки, городские события"),
+    ("🌳", "парки, деревья, природа, погода"),
+    ("🏥", "здравоохранение, больницы"),
+    ("🏫", "школы, детсады, образование"),
+    ("🛒", "магазины, рынки, цены"),
+    ("🐾", "животные, зоопарк"),
+    ("⚠️", "предупреждение жителям"),
+    ("📰", "если ничего из списка не подходит"),
+)
+DEFAULT_EMOJI = "📰"
+_VS16 = "️"        # вариационный селектор: модель отдаёт ⚠ то с ним, то без
 
 DEFAULT_CRITERIA = (
     "Городская жизнь Злина и окрестностей: новости и происшествия, дороги, перекрытия и "
@@ -78,10 +105,13 @@ PROMPT = """Ты редактор телеграм-канала о жизни г
    переделка русского текста: пиши естественной украинской лексикой.
 6. "post_en" — тот же пересказ по-английски, так же кратко. Чешские названия улиц, районов
    и учреждений оставляй как есть, не переводи их на английский.
-7. "facts" — 1–3 коротких факта из записи по-чешски (цифры, даты, места), чтобы можно было
+7. "emoji" — один-два эмодзи к теме записи, СТРОГО из списка ниже, без флагов стран и
+   смайликов-лиц. Два бери только если запись правда о двух темах.
+{emoji_list}
+8. "facts" — 1–3 коротких факта из записи по-чешски (цифры, даты, места), чтобы можно было
    сверить пересказ с оригиналом.
-8. Не называй по имени частных лиц. Названия организаций, должности и публичные лица — можно.
-9. Если запись каналу не подходит, "skip": true, а все пересказы и "facts" — пустые.
+9. Не называй по имени частных лиц. Названия организаций, должности и публичные лица — можно.
+10. Если запись каналу не подходит, "skip": true, а все пересказы и "facts" — пустые.
 
 {extra}ИСТОЧНИК: {source}
 ЗАПИСЬ:
@@ -122,6 +152,7 @@ class Verdict:
     post_ru: str = ""
     post_ua: str = ""
     post_en: str = ""
+    emoji: str = ""
     facts: tuple[str, ...] = ()
     model: str = ""
     raw: str = field(default="", repr=False)
@@ -146,6 +177,7 @@ def parse_response(text: str) -> Verdict:
         post_ru=_clean(data.get("post_ru")),
         post_ua=_clean(data.get("post_ua")),
         post_en=_clean(data.get("post_en")),
+        emoji=pick_emoji(_clean(data.get("emoji"))) if not skip else "",
         facts=tuple(_clean(f) for f in facts if _clean(f))[:3],
         raw=text,
     )
@@ -200,8 +232,20 @@ def build_prompt(text: str, *, source: str, criteria: str = DEFAULT_CRITERIA, ex
     """extra — разовое указание редактора при переписывании («короче», «убери цены»)."""
     note = (f"ОТДЕЛЬНОЕ УКАЗАНИЕ РЕДАКТОРА (важнее общих правил стиля): {extra.strip()}\n\n"
             if extra.strip() else "")
+    listing = "\n".join(f"   {mark} — {about}" for mark, about in ALLOWED_EMOJI)
     return PROMPT.format(criteria=criteria.strip(), source=source or "неизвестен",
-                         text=text.strip(), extra=note)
+                         text=text.strip(), extra=note, emoji_list=listing)
+
+
+def pick_emoji(raw: str, limit: int = 2) -> str:
+    """Оставить из ответа модели только эмодзи из списка, в порядке появления.
+
+    Модель иногда добавляет своё поверх списка или теряет вариационный селектор,
+    поэтому сверяем «голые» формы, а в пост кладём канонические."""
+    bare = (raw or "").replace(_VS16, "")
+    found = sorted(((bare.index(mark.replace(_VS16, "")), mark) for mark, _ in ALLOWED_EMOJI
+                    if mark.replace(_VS16, "") in bare))
+    return " ".join(mark for _, mark in found[:limit]) or DEFAULT_EMOJI
 
 
 class Gemini:
@@ -249,7 +293,7 @@ class Gemini:
         data = await self._post(f"{API_ROOT}/models/{self.model}:generateContent", body)
         verdict = parse_response(_answer_text(data))
         return Verdict(verdict.skip, verdict.post, verdict.post_ru, verdict.post_ua, verdict.post_en,
-                       verdict.facts, self.model, verdict.raw)
+                       verdict.emoji, verdict.facts, self.model, verdict.raw)
 
     # -- внутреннее ----------------------------------------------------------
 

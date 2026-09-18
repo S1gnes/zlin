@@ -13,7 +13,7 @@ T0 = 1_789_000_000
 NEWS = "Uzavírka na třídě Tomáše Bati potrvá od 20. září do 30. října, objízdná trasa vede přes Kvítkovou."
 KEEP = Verdict(False, "Uzavírka potrvá do 30. října.", "Перекрытие продлится до 30 октября.",
                "Перекриття триватиме до 30 жовтня.", "The closure lasts until 30 October.",
-               ("od 20. září", "třída Tomáše Bati"), model="gemini-2.5-flash")
+               "🚧", ("od 20. září", "třída Tomáše Bati"), model="gemini-2.5-flash")
 
 
 class FakeGemini:
@@ -88,6 +88,7 @@ async def test_keep_creates_draft(db):
     [draft] = await db.drafts()
     assert draft.summary == KEEP.post and draft.summary_ru == KEEP.post_ru
     assert draft.summary_ua == KEEP.post_ua and draft.summary_en == KEEP.post_en
+    assert draft.emoji == "🚧"
     assert draft.facts == list(KEEP.facts) and draft.model == "gemini-2.5-flash"
     assert (await db.event_counts(0)).get("drafted") == 1
 

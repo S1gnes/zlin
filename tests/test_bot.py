@@ -11,7 +11,7 @@ from zlinbot.db import Database
 from zlinbot.gemini import Verdict
 
 T0 = 1_789_000_000
-REWRITTEN = Verdict(False, "Kratší verze.", "Короче.", "Коротше.", "Shorter.", ("fakt",),
+REWRITTEN = Verdict(False, "Kratší verze.", "Короче.", "Коротше.", "Shorter.", "🚧", ("fakt",),
                     model="gemini-2.5-flash")
 
 
@@ -42,7 +42,8 @@ async def env(tmp_path):
                                       summary_ru="Перекрытие продлится до 30 октября.",
                                       summary_ua="Перекриття триватиме до 30 жовтня.",
                                       summary_en="The closure lasts until 30 October.",
-                                      facts=["od 20. září"], model="gemini-2.5-flash", now=T0)
+                                      emoji="🚧", facts=["od 20. září"],
+                                      model="gemini-2.5-flash", now=T0)
         bot, session = make_bot()
         gemini = FakeGemini()
         yield db, bot, session, gemini, draft_id
@@ -95,7 +96,7 @@ async def test_publish_posts_to_channel_in_the_required_format(env):
     await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
 
     post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
-    assert post.text.startswith("Uzavírka potrvá do 30. října.")
+    assert post.text.startswith("🚧 Uzavírka potrvá do 30. října.")
     assert '📍 <a href="https://zlin.cz/zpravy/a/">ZLIN.CZ</a>' in post.text   # ссылка в гипертексте
     assert "🔗 https://" not in post.text                            # голого URL в посте больше нет
     assert post.link_preview_options.is_disabled is True
@@ -134,11 +135,11 @@ async def test_all_four_languages_go_in_the_post_itself(env):
     await dp.feed_update(bot, callback_update(f"d:publish:{draft_id}"))
     post = next(c for c in session.calls if isinstance(c, SendMessage) and c.chat_id == CHANNEL_ID)
 
-    assert post.text.startswith("Uzavírka potrvá do 30. října.\n\n")   # чешский ведущим абзацем
-    assert "RU · Перекрытие продлится до 30 октября." in post.text
-    assert "UA · Перекриття триватиме до 30 жовтня." in post.text
-    assert "EN · The closure lasts until 30 October." in post.text
-    assert "tg-spoiler" not in post.text                            # спойлера больше нет
+    assert post.text.startswith("🚧 Uzavírka potrvá do 30. října.\n\n")  # эмодзи темы + чешский
+    assert "RU · <tg-spoiler>Перекрытие продлится до 30 октября.</tg-spoiler>" in post.text
+    assert "UA · <tg-spoiler>Перекриття триватиме до 30 жовтня.</tg-spoiler>" in post.text
+    assert "EN · <tg-spoiler>The closure lasts until 30 October.</tg-spoiler>" in post.text
+    assert post.text.count("<tg-spoiler>") == 3                     # блюр у каждого свой
     assert "🇷🇺" not in post.text                                    # флагов стран в посте нет
     assert post.text.index("RU ·") < post.text.index("UA ·") < post.text.index("EN ·")
     assert post.text.rstrip().endswith("</a>")                      # источник со ссылкой — последним

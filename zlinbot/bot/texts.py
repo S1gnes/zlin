@@ -10,6 +10,7 @@ from html import escape
 
 from ..config import TZ
 from ..db import Draft, Group, StoredPost
+from ..gemini import DEFAULT_EMOJI
 
 # Лимиты Telegram
 MAX_TEXT = 4096
@@ -25,10 +26,12 @@ SEP = " · "          # между меткой языка и текстом
 def channel_post(draft: Draft, post: StoredPost, group: Group | None) -> str:
     """Формат из ТЗ: пересказ, источник, ссылка на оригинал. Указание источника не отключается.
 
-    Чешский идёт ведущим абзацем без метки, переводы — отдельными абзацами с меткой языка.
+    Чешский идёт ведущим абзацем с эмодзи по теме, переводы — отдельными абзацами, каждый
+    под своим спойлером: читателю нужен один язык, а не стена из четырёх.
     Ссылка спрятана в название источника: голый URL в конце поста только шумит.
     """
-    parts = [escape(draft.summary).strip()]
+    head = " ".join(part for part in (draft.emoji or DEFAULT_EMOJI, escape(draft.summary).strip()) if part)
+    parts = [head]
     if body := translations(draft):
         parts.append(body)
     parts.append(f"{SOURCE_MARK} {source_link(post, group)}")
@@ -41,9 +44,16 @@ def source_link(post: StoredPost, group: Group | None) -> str:
     return f'<a href="{escape(post.permalink, quote=True)}">{name}</a>' if post.permalink else name
 
 
-def translations(draft: Draft) -> str:
-    """Переводы абзацами: «RU · …», «UA · …», «EN · …». Пусто, если переводов нет."""
-    return "\n\n".join(f"{mark}{SEP}{escape(text)}"
+def translations(draft: Draft, *, spoiler: bool = True) -> str:
+    """Переводы абзацами: «RU · …», «UA · …», «EN · …». Пусто, если переводов нет.
+
+    spoiler — каждый перевод под своим блюром; метка языка остаётся открытой, иначе
+    непонятно, какой именно раскрываешь. В карточке черновика блюр не нужен: там читают."""
+    def body(text: str) -> str:
+        clean = escape(text)
+        return f"<tg-spoiler>{clean}</tg-spoiler>" if spoiler else clean
+
+    return "\n\n".join(f"{mark}{SEP}{body(text)}"
                        for code, mark in LANG_MARKS
                        if (text := getattr(draft, f"summary_{code}", None)))
 
@@ -52,8 +62,8 @@ def draft_card(draft: Draft, post: StoredPost, group: Group | None, *, media_rea
     when = fmt_when(post.created_at or post.seen_at)
     source = escape(group.title if group else "источник")
     lines = [f"📨 <b>Черновик #{draft.id}</b> · {source} · {when}",
-             "", escape(draft.summary)]
-    if body := translations(draft):
+             "", f"{draft.emoji or DEFAULT_EMOJI} {escape(draft.summary)}"]
+    if body := translations(draft, spoiler=False):   # в карточке блюр только мешает читать
         lines += ["", body]
     if draft.facts:
         lines += ["", "<b>Сверь с оригиналом:</b>"] + [f"• {escape(f)}" for f in draft.facts]
