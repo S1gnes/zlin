@@ -88,6 +88,19 @@ def test_prompt_lists_the_allowed_emoji():
         assert mark in prompt
 
 
+def test_prompt_keeps_proper_names_in_czech():
+    """Города, улицы, больницы, фирмы и люди должны остаться в чешском написании во всех
+    переводах — иначе читатель не найдёт место на табличке и в карте. Но чешский пересказ
+    правило не трогает: там свои падежи («ve Zlíně», а не «ve městě Zlín»)."""
+    prompt = build_prompt("x", source="s")
+    assert "НЕ ПЕРЕВОДИ И НЕ\n   ТРАНСЛИТЕРИРУЙ" in prompt
+    for example in ("Zlín", "Kvítková", "Krajská nemocnice T. Bati", "Dřevnice", "DSZO"):
+        assert example in prompt
+    assert "ПЕРВОМ падеже" in prompt                 # название не склоняется
+    assert "ve Zlíně" in prompt                      # а чешский текст — живой
+    assert 'НА ЧЕШСКИЙ ПЕРЕСКАЗ "post" ЭТО ПРАВИЛО НЕ РАСПРОСТРАНЯЕТСЯ' in prompt
+
+
 def test_prompt_carries_rules_and_content():
     prompt = build_prompt("Uzavírka od 20. září", source="ZLIN.CZ", criteria="Только новости города")
     assert "Только новости города" in prompt and "ZLIN.CZ" in prompt and "Uzavírka od 20. září" in prompt
